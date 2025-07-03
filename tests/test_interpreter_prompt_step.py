@@ -6,8 +6,9 @@ import os
 import openai
 
 from pil_engine.interpreter import Interpreter, PilParser
-from pil_engine.core.components import PilProgram, PromptStep, Config, Persona, Input
+from pil_engine.core.components import PilProgram, PromptStep, Config, Persona, Input # Removed unused Input
 from pil_engine.core.context import Context
+from pil_engine.exceptions import ConfigurationError # Added import
 
 
 # Helper to create a PilProgram with a single PromptStep
@@ -118,16 +119,13 @@ class TestInterpreterPromptStep(unittest.TestCase):
 
 
     def test_llm_call_no_api_key_raises_error(self):
-        # No API key in config, and we ensure no OPENAI_API_KEY in env (setUp does this)
-        pil_program = create_prompt_test_program(prompt_text="Test prompt", api_key=None)
+        # No API key in config, and OPENAI_API_KEY is unset by setUp.
+        # Program has a model, so initialization will fail.
+        pil_program = create_prompt_test_program(prompt_text="Test prompt", model_name="gpt-test-model", api_key=None)
 
-        # Initialization should set llm_client to None
-        interpreter = Interpreter(pil_program)
-        self.assertIsNone(interpreter.llm_client)
+        with self.assertRaisesRegex(ConfigurationError, "API key not found .* for model 'gpt-test-model'"):
+            Interpreter(pil_program) # Error should occur at Interpreter instantiation
 
-        prompt_step_obj = pil_program.workflow.steps[0]
-        with self.assertRaisesRegex(ConnectionRefusedError, "LLM client is not initialized"):
-            interpreter._execute_prompt_step(prompt_step_obj)
 
     @patch('openai.OpenAI')
     def test_llm_call_with_persona_and_examples(self, MockOpenAI):

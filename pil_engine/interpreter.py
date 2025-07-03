@@ -7,10 +7,15 @@ from .core.components import (
 )
 from .core.context import Context
 from .utils import render_template_string, safe_eval_code_string
+from .exceptions import ( # Import custom exceptions
+    ToolNotFoundException, ToolExecutionError, OutputValidationError,
+    InvalidSchemaError, ConfigurationError
+)
 
 import os
-import openai # Added for actual LLM client
-import re # Added for tokenization in retrieval
+import openai
+import re
+import jsonschema
 
 # --- Conceptual Debugging Strategy Notes for Interpreter ---
 # (Already detailed in previous step, summarized here for context)
@@ -161,10 +166,13 @@ class Interpreter:
         api_key = api_key_from_config or os.environ.get("OPENAI_API_KEY")
 
         if not api_key:
-            self._add_trace_log("LLM_CLIENT_INIT_FAILED", model=model_name, reason="API key not found in config or environment (OPENAI_API_KEY).")
-            print(f"Interpreter: LLM client for model '{model_name}' not initialized: API key missing.")
-            self.llm_client = None # Explicitly set to None, indicating no client.
-            return
+            error_msg = f"API key not found in config or environment (OPENAI_API_KEY) for model '{model_name}'."
+            self._add_trace_log("LLM_CLIENT_INIT_FAILED", model=model_name, reason=error_msg)
+            # Raise ConfigurationError here if strict initialization is desired,
+            # otherwise _execute_prompt_step will handle it if self.llm_client is None.
+            # Let's make it strict: if a model is specified, a key must be found for client init.
+            self.llm_client = None
+            raise ConfigurationError(error_msg)
 
         try:
             self.llm_client = openai.OpenAI(api_key=api_key)
@@ -329,11 +337,12 @@ class Interpreter:
         final_prompt_for_llm = "\n\n".join(full_prompt_parts)
         print(f"    - Rendered Prompt for LLM: \n\"{final_prompt_for_llm}\"")
 
-        if self.llm_client is None: # Check if client was successfully initialized
-            # This can happen if API key was missing or model not specified during _initialize_llm_client.
-            error_message = "LLM client is not initialized. Check API key and model configuration."
-            self._add_trace_log("LLM_CALL_FAILED", reason=error_message, client_instance=str(self.llm_client))
-            raise ConnectionRefusedError(error_message)
+        if self.llm_client is None:
+            # This will now typically not be hit if _initialize_llm_client raises ConfigurationError first.
+            # However, it's a good safeguard if client somehow becomes None later or init logic changes.
+            error_message = "LLM client is not available for PromptStep. Check API key and model configuration."
+            self._add_trace_log("LLM_CALL_FAILED", reason=error_message)
+            raise ConfigurationError(error_message)
 
         # Construct messages for OpenAI API
         messages = []
@@ -463,7 +472,7 @@ class Interpreter:
         if step.name not in self.tool_registry:
             error_msg = f"Tool '{step.name}' not found in registry. Available tools: {list(self.tool_registry.keys())}"
             self._add_trace_log("TOOL_CALL_ERROR", tool_name=step.name, reason="Tool not found")
-            raise KeyError(error_msg) # Or a custom ToolNotFoundException
+            raise ToolNotFoundException(error_msg, tool_name=step.name, available_tools=list(self.tool_registry.keys()))
 
         tool_callable = self.tool_registry[step.name]
 
@@ -473,15 +482,14 @@ class Interpreter:
             self._add_trace_log("TOOL_EXECUTION_SUCCESS", tool_name=step.name, output=str(tool_output))
             print(f"    - Tool '{step.name}' executed successfully.")
             return tool_output
-        except TypeError as e: # Mismatched arguments, etc.
-            error_msg = f"Error calling tool '{step.name}' with args {rendered_args}: {e}"
+        except TypeError as e:
+            error_msg = f"Type error while calling tool '{step.name}' with args {rendered_args}: {e}"
             self._add_trace_log("TOOL_EXECUTION_ERROR", tool_name=step.name, error_type="TypeError", error_message=str(e))
-            raise TypeError(error_msg) from e # Re-raise as TypeError to be potentially caught by user code
-        except Exception as e: # Catch any other exception from the tool itself
+            raise ToolExecutionError(error_msg, tool_name=step.name, original_exception=e) from e
+        except Exception as e:
             error_msg = f"Tool '{step.name}' raised an exception: {e}"
             self._add_trace_log("TOOL_EXECUTION_ERROR", tool_name=step.name, error_type=type(e).__name__, error_message=str(e))
-            # Wrap in a more generic RuntimeError or a custom ToolExecutionError
-            raise RuntimeError(error_msg) from e
+            raise ToolExecutionError(error_msg, tool_name=step.name, original_exception=e) from e
 
 
     def _execute_code_step(self, step: CodeStep) -> Any:
@@ -667,6 +675,25 @@ class Interpreter:
             print(f"Interpreter: Program defines an output schema. TODO: Validate final output against schema.")
 
         self._add_trace_log("INTERPRETER_RUN_END", final_output_from_workflow=str(final_output))
+
+        # Output Schema Validation
+        if self.pil_program.output_schema and self.pil_program.output_schema.schema:
+            self._add_trace_log("OUTPUT_SCHEMA_VALIDATION_START", schema=self.pil_program.output_schema.schema, output_to_validate=str(final_output))
+            print(f"Interpreter: Validating final output against outputSchema...")
+            try:
+                jsonschema.validate(instance=final_output, schema=self.pil_program.output_schema.schema)
+                self._add_trace_log("OUTPUT_SCHEMA_VALIDATION_SUCCESS")
+                print("Interpreter: Output schema validation successful.")
+            except jsonschema.ValidationError as e:
+                # Potentially wrap this in a custom OutputValidationError
+                error_msg = f"Output validation failed: {e.message} (Path: {'/'.join(map(str, e.path)) if e.path else 'N/A'})"
+                self._add_trace_log("OUTPUT_SCHEMA_VALIDATION_FAILED", error=e.message, details=str(e))
+                raise OutputValidationError(f"Output validation failed for instance: {str(final_output)[:100]}...", validation_error=e) from e
+            except jsonschema.SchemaError as e: # If the schema itself is invalid
+                error_msg = f"Invalid OutputSchema provided in PIL program: {e.message}"
+                self._add_trace_log("OUTPUT_SCHEMA_INVALID", error=error_msg, details=str(e))
+                raise InvalidSchemaError(error_msg, schema_error=e) from e
+
         print("Interpreter: PIL program execution finished.")
 
         if self.debug_mode:

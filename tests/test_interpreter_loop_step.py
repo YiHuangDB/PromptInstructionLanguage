@@ -7,24 +7,25 @@ from pil_engine.interpreter import Interpreter, PilParser
 from pil_engine.core.context import Context
 
 # Helper to quickly create a PilProgram for testing loop steps
-def create_loop_test_program(loop_yaml_snippet: Dict[str, Any], initial_vars: Dict[str, Any] = None, add_dummy_api_key_to_config: bool = False) -> PilProgram:
-    base_program_dict = {
-        "config": {"model": "test-model"}, # Default model name
+def create_loop_test_program(loop_yaml_snippet: Dict[str, Any], initial_vars: Dict[str, Any] = None, include_llm_config: bool = False) -> PilProgram:
+    program_dict = {
+        "config": {},
         "workflow": {
             "steps": [
                 loop_yaml_snippet # The loop step itself
             ]
         }
     }
-    if add_dummy_api_key_to_config:
-        base_program_dict["config"]["api_key"] = "dummy_test_key_for_mocking"
+    if include_llm_config: # Used for tests that involve PromptSteps
+        program_dict["config"]["model"] = "test-model-for-loop"
+        program_dict["config"]["api_key"] = "dummy_test_key_for_mocking"
 
     if initial_vars:
         # Add input definitions if initial_vars are provided, for completeness, though not strictly enforced by current Input component
-        base_program_dict["input"] = {"vars": {k: type(v).__name__ for k,v in initial_vars.items()}}
+        program_dict["input"] = {"vars": {k: type(v).__name__ for k,v in initial_vars.items()}}
 
     parser = PilParser()
-    return parser.parse_dict(base_program_dict)
+    return parser.parse_dict(program_dict)
 
 class TestInterpreterLoopStep(unittest.TestCase):
 
@@ -50,10 +51,12 @@ class TestInterpreterLoopStep(unittest.TestCase):
             "def": "loop_results"
         }
         initial_context_vars = {"my_items": ["apple", "banana"]}
-        # Add dummy API key so client initialization is attempted (and thus mocked)
-        program = create_loop_test_program(loop_yaml_snippet, initial_vars=initial_context_vars, add_dummy_api_key_to_config=True)
+        program = create_loop_test_program(loop_yaml_snippet, initial_vars=initial_context_vars, include_llm_config=True)
 
         interpreter = Interpreter(pil_program=program, initial_vars=initial_context_vars, debug_mode=False)
+        # Ensure the mock is correctly configured by _initialize_llm_client
+        MockOpenAI.assert_called_with(api_key="dummy_test_key_for_mocking")
+
         final_output = interpreter.run()
 
         loop_output_in_context = interpreter.context.get_variable("loop_results")

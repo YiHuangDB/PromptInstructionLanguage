@@ -17,7 +17,7 @@ def create_retrieve_test_program(
 ) -> PilProgram:
 
     program_dict = {
-        "config": {"model": "test-model"}, # Needed for interpreter init
+        "config": {}, # No model specified, so LLM client init will be skipped
         "workflow": {
             "steps": [
                 {
