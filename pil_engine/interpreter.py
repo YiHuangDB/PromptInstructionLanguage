@@ -62,6 +62,23 @@ class Interpreter:
         self._load_all_knowledge_bases()
 
     def register_tool(self, name: str, tool_callable: Callable):
+        """
+        Registers a Python callable as a tool that can be invoked by ToolSteps.
+
+        Args:
+            name (str): The name to register the tool under. This name is used
+                        in the ToolStep's 'name' field in the PIL program.
+            tool_callable (Callable): The Python function or method to be executed
+                                      when this tool is called.
+
+        Raises:
+            ValueError: If the tool name is not a non-empty string.
+            TypeError: If the tool_callable is not a callable Python function/method.
+
+        Prints:
+            A warning if a tool with the same name is being re-registered.
+            A confirmation message when the tool is registered.
+        """
         if not isinstance(name, str) or not name:
             raise ValueError("Tool name must be a non-empty string.")
         if not callable(tool_callable):
