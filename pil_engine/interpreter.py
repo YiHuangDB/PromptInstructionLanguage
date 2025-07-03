@@ -1,6 +1,7 @@
 import asyncio
 import functools # For functools.partial
 import inspect # For iscoroutinefunction
+import logging # Added
 import yaml
 import asteval # For CodeStep execution sandbox
 from typing import Dict, Any, Optional, List, Callable
@@ -20,6 +21,9 @@ import os
 import openai
 import re
 import jsonschema
+
+# Module-level logger
+logger = logging.getLogger(__name__)
 
 class PilParser:
     def __init__(self):
@@ -180,12 +184,14 @@ class Interpreter:
             return
         defined_input_vars = {var.name: var for var in self.pil_program.input.vars}
         for name, value in provided_inputs.items():
-            if name not in defined_input_vars:
+            if name not in defined_input_vars and name != "pil_last_error_info": # Allow special internal var
                 err_msg = f"Unexpected input variable '{name}' provided. Defined inputs: {list(defined_input_vars.keys())}"
                 self._add_trace_log("INPUT_VALIDATION_ERROR", error=err_msg)
                 raise ValueError(err_msg)
             self.context.set_variable(name, value)
             self._add_trace_log("INPUT_SET", variable=name, value=value)
+
+        # Check for missing *declared* inputs (excluding the special internal one)
         for name, var_def in defined_input_vars.items():
             if not self.context.has_variable(name):
                 err_msg = f"Missing required input variable '{name}'."
@@ -574,64 +580,123 @@ class Interpreter:
         return None
 
     async def run(self, inputs: Optional[Dict[str, Any]] = None) -> Any:
-        self._add_trace_log("INTERPRETER_RUN_START", pil_program_config_model=self.pil_program.config.model if self.pil_program.config else "N/A")
+        # Determine the base inputs for this entire run cycle (initial call + retries)
+        # If inputs are provided to run(), they take precedence.
+        # Otherwise, use the state of self.context as it was when run() was called
+        # (this would contain initial_vars passed to Interpreter's constructor).
+        if inputs is not None:
+            # Make a deepcopy if inputs can contain mutable structures, though for now, shallow is what previous logic did.
+            base_inputs_for_this_run_cycle = inputs.copy()
+        else:
+            # Capture the state of context as established by __init__(initial_vars=...)
+            # This context is stored in self.context when run is first called.
+            base_inputs_for_this_run_cycle = self.context.get_all_variables().copy()
+
+        self._add_trace_log("INTERPRETER_RUN_START",
+                            pil_program_config_model=self.pil_program.config.model if self.pil_program.config else "N/A",
+                            initial_inputs_to_run=inputs, # Log what was directly passed to run()
+                            base_inputs_for_cycle=base_inputs_for_this_run_cycle) # Log the effective base
         print(f"Interpreter: Running PIL program...")
-        if inputs:
-            self._validate_inputs(inputs)
-        if self.pil_program.input and self.pil_program.input.vars:
-            required_program_inputs = [var.name for var in self.pil_program.input.vars]
-            missing_vars_in_context = [req_var for req_var in required_program_inputs if not self.context.has_variable(req_var)]
-            if missing_vars_in_context:
-                err_msg = (f"Missing required input variables in context: {', '.join(missing_vars_in_context)}. "
-                           f"Defined inputs in program: {required_program_inputs}. Ensure they are provided either via "
-                           f"Interpreter's initial_vars or the 'inputs' argument to run().")
-                self._add_trace_log("INPUT_VALIDATION_ERROR", error=err_msg, missing_variables=missing_vars_in_context)
-                raise ValueError(err_msg)
-        if self.pil_program.persona and self.pil_program.persona.role:
-            self.context.set_variable("__persona__", self.pil_program.persona)
-            self._add_trace_log("PERSONA_SET", persona_role=self.pil_program.persona.role)
-            print(f"Interpreter: Persona set: {self.pil_program.persona.role}")
-        if not self.pil_program.workflow or not self.pil_program.workflow.steps:
-            self._add_trace_log("WORKFLOW_EMPTY", status="Workflow has no steps.")
-            print("Interpreter: Workflow has no steps to execute.")
-            return None
-        final_output = await self._execute_workflow_steps(self.pil_program.workflow.steps) # Added await
-        self._add_trace_log("INTERPRETER_RUN_END", final_output_from_workflow=str(final_output))
-        if self.pil_program.output_schema and self.pil_program.output_schema.schema:
-            self._add_trace_log("OUTPUT_SCHEMA_VALIDATION_START", schema=self.pil_program.output_schema.schema, output_to_validate=str(final_output))
-            print(f"Interpreter: Validating final output against outputSchema...")
-            try:
-                jsonschema.validate(instance=final_output, schema=self.pil_program.output_schema.schema)
-                self._add_trace_log("OUTPUT_SCHEMA_VALIDATION_SUCCESS")
-                print("Interpreter: Output schema validation successful.")
-            except jsonschema.ValidationError as e:
-                error_msg = f"Output validation failed: {e.message} (Path: {'/'.join(map(str, e.path)) if e.path else 'N/A'})"
-                self._add_trace_log("OUTPUT_SCHEMA_VALIDATION_FAILED", error=e.message, details=str(e))
-                raise OutputValidationError(error_msg, validation_error=e) from e
-            except jsonschema.SchemaError as e:
-                error_msg = f"Invalid OutputSchema provided in PIL program: {e.message}"
-                self._add_trace_log("OUTPUT_SCHEMA_INVALID", error=error_msg, details=str(e))
-                raise InvalidSchemaError(error_msg, schema_error=e) from e
 
-        if self.pil_program.constraints:
-            self._add_trace_log("PROGRAM_CONSTRAINTS_VALIDATION_START", constraints=str(self.pil_program.constraints), output_to_validate=str(final_output))
-            print(f"Interpreter: Applying program-level constraints...")
-            try:
-                final_output = apply_constraints( # Re-assign final_output
-                    value=final_output,
-                    constraints=self.pil_program.constraints,
-                    context=self.context, # Pass current context
-                    step_name="PilProgram (Top-Level Constraints)"
-                )
-                self._add_trace_log("PROGRAM_CONSTRAINTS_VALIDATION_SUCCESS", validated_output=str(final_output))
-                print("Interpreter: Program-level constraints validation successful.")
-            except ConstraintViolationError as cve:
-                self._add_trace_log("PROGRAM_CONSTRAINTS_VALIDATION_FAILED", error=str(cve))
-                print(f"Interpreter: Program-level constraints validation failed: {cve}")
-                raise # Re-raise the original ConstraintViolationError
+        max_retries = self.pil_program.config.max_program_retries if self.pil_program.config else 0
+        current_retry_count = 0
 
+        current_inputs_for_attempt = base_inputs_for_this_run_cycle.copy()
+        final_output = None
+        last_validation_error: Optional[Exception] = None
+
+        while current_retry_count <= max_retries:
+            self._add_trace_log("PROGRAM_ATTEMPT_START", attempt=current_retry_count + 1, max_attempts=max_retries + 1, current_run_inputs=current_inputs_for_attempt)
+
+            # Reset context for each full attempt
+            self.context = Context() # Fresh context for the attempt
+            # Validate and populate context using current_inputs_for_attempt
+            # _validate_inputs will populate self.context based on current_inputs_for_attempt
+            # and check against self.pil_program.input.vars
+            if self.pil_program.input and self.pil_program.input.vars:
+                 self._validate_inputs(current_inputs_for_attempt)
+            else: # No inputs declared in program, but some might have been passed (e.g. pil_last_error_info)
+                 self.context = Context(initial_vars=current_inputs_for_attempt)
+
+
+            if self.pil_program.persona and self.pil_program.persona.role:
+                self.context.set_variable("__persona__", self.pil_program.persona)
+                self._add_trace_log("PERSONA_SET", persona_role=self.pil_program.persona.role)
+
+            if not self.pil_program.workflow or not self.pil_program.workflow.steps:
+                self._add_trace_log("WORKFLOW_EMPTY", status="Workflow has no steps.")
+                print("Interpreter: Workflow has no steps to execute.")
+                return None
+
+            try:
+                workflow_output = await self._execute_workflow_steps(self.pil_program.workflow.steps)
+                self._add_trace_log("WORKFLOW_EXECUTION_SUCCESS", attempt=current_retry_count + 1, workflow_output=str(workflow_output))
+
+                final_output = workflow_output # Tentative final output
+
+                # 1. OutputSchema Validation
+                if self.pil_program.output_schema and self.pil_program.output_schema.schema:
+                    self._add_trace_log("OUTPUT_SCHEMA_VALIDATION_START", attempt=current_retry_count+1, schema=self.pil_program.output_schema.schema, output_to_validate=str(final_output))
+                    print(f"Interpreter: Validating final output against outputSchema (Attempt {current_retry_count+1})...")
+                    jsonschema.validate(instance=final_output, schema=self.pil_program.output_schema.schema)
+                    self._add_trace_log("OUTPUT_SCHEMA_VALIDATION_SUCCESS", attempt=current_retry_count+1)
+                    print("Interpreter: Output schema validation successful.")
+
+                # 2. Top-Level Constraints Validation
+                if self.pil_program.constraints:
+                    self._add_trace_log("PROGRAM_CONSTRAINTS_VALIDATION_START", attempt=current_retry_count+1, constraints=str(self.pil_program.constraints), output_to_validate=str(final_output))
+                    print(f"Interpreter: Applying program-level constraints (Attempt {current_retry_count+1})...")
+                    final_output = apply_constraints( # Re-assign final_output
+                        value=final_output,
+                        constraints=self.pil_program.constraints,
+                        context=self.context,
+                        step_name="PilProgram (Top-Level Constraints)"
+                    )
+                    self._add_trace_log("PROGRAM_CONSTRAINTS_VALIDATION_SUCCESS", attempt=current_retry_count+1, validated_output=str(final_output))
+                    print("Interpreter: Program-level constraints validation successful.")
+
+                # If both validations passed
+                self._add_trace_log("PROGRAM_ATTEMPT_SUCCESS", attempt=current_retry_count + 1, final_output=str(final_output))
+                print(f"Interpreter: PIL program execution attempt {current_retry_count + 1} successful.")
+                break # Exit retry loop on success
+
+            except (OutputValidationError, ConstraintViolationError) as e_val:
+                last_validation_error = e_val
+                logger.warning(f"Attempt {current_retry_count + 1} failed validation: {e_val}")
+                self._add_trace_log("PROGRAM_ATTEMPT_VALIDATION_FAILED", attempt=current_retry_count + 1, error_type=type(e_val).__name__, error_message=str(e_val))
+
+                current_retry_count += 1
+                if current_retry_count <= max_retries:
+                    error_info_str = f"Previous execution attempt failed. Error Type: {type(e_val).__name__}. Message: {str(e_val)}."
+                    # Add schema/constraint details to error_info_str if useful
+                    if isinstance(e_val, OutputValidationError) and self.pil_program.output_schema:
+                         error_info_str += f" Expected Schema: {str(self.pil_program.output_schema.schema)[:200]}..." # Truncate for brevity
+                    elif isinstance(e_val, ConstraintViolationError) and self.pil_program.constraints:
+                         error_info_str += f" Expected Constraints: {str(self.pil_program.constraints)[:200]}..."
+
+                    current_inputs = original_inputs.copy() # Start with original inputs for next retry
+                    current_inputs["pil_last_error_info"] = error_info_str
+
+                    self._add_trace_log("PROGRAM_RETRYING", attempt=current_retry_count + 1, error_info_for_next_run=error_info_str)
+                    print(f"Interpreter: Retrying program (attempt {current_retry_count}/{max_retries}). Error info will be available as 'pil_last_error_info'.")
+                    # Context will be reset at the start of the next loop iteration
+                else:
+                    logger.error(f"All {max_retries + 1} program execution attempts failed due to validation errors.")
+                    self._add_trace_log("PROGRAM_ALL_RETRIES_FAILED", final_error_type=type(last_validation_error).__name__, final_error_message=str(last_validation_error))
+                    raise last_validation_error # Re-raise the last validation error
+            except Exception as e_runtime: # Catch other unexpected runtime errors during workflow execution
+                logger.error(f"Attempt {current_retry_count + 1} failed with unexpected runtime error: {e_runtime}", exc_info=True)
+                self._add_trace_log("PROGRAM_ATTEMPT_RUNTIME_ERROR", attempt=current_retry_count + 1, error_type=type(e_runtime).__name__, error_message=str(e_runtime))
+                # Decide if such errors should also trigger program retries or fail immediately.
+                # For now, let's make them fail immediately as they are not validation issues for self-correction.
+                # Ensure logger is accessible, using fully qualified name if module-level 'logger' is problematic.
+                logging.getLogger(__name__).error(f"Attempt {current_retry_count + 1} failed with unexpected runtime error: {e_runtime}", exc_info=True)
+                raise e_runtime
+
+
+        self._add_trace_log("INTERPRETER_RUN_COMPLETED", final_output_returned=str(final_output))
         print("Interpreter: PIL program execution finished.")
-        if self.debug_mode:
+        if self.debug_mode and self.trace_log: # Ensure trace_log is not None
             print("\n--- DEBUG TRACE LOG ---")
             for entry in self.trace_log:
                 print(yaml.dump(entry, indent=2, default_flow_style=False, sort_keys=False))

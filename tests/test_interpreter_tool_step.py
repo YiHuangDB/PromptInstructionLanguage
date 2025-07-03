@@ -33,12 +33,12 @@ def tool_that_raises_exception():
 def create_tool_test_program(
     tool_name: str,
     tool_args: Dict[str, Any],
-    initial_vars: dict = None,
+    initial_vars_spec: dict = None, # Changed from initial_vars (data) to initial_vars_spec (name:type_str)
     def_var: str = "tool_output"
 ) -> PilProgram:
 
     program_dict = {
-        "config": {"model": "test-model"}, # Base config
+        "config": {"model": "test-model"},
         "workflow": {
             "steps": [
                 {
@@ -51,14 +51,14 @@ def create_tool_test_program(
             ]
         }
     }
-    if initial_vars:
-         program_dict["input"] = {"vars": {k: type(v).__name__ for k,v in initial_vars.items()}}
+    if initial_vars_spec: # If a spec for input variables is provided
+         program_dict["input"] = {"vars": initial_vars_spec}
 
     parser = PilParser()
     return parser.parse_dict(program_dict)
 
 
-class TestInterpreterToolStep(unittest.IsolatedAsyncioTestCase): # Changed base class
+class TestInterpreterToolStep(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         self.interpreter = Interpreter(PilParser().parse_dict({"workflow": {"steps": []}}))
@@ -80,16 +80,17 @@ class TestInterpreterToolStep(unittest.IsolatedAsyncioTestCase): # Changed base 
         program = create_tool_test_program(
             "greet_user",
             {"name": "{{user_name}}", "greeting": "Hi"},
-            initial_vars={"user_name": "Alice"}
+            initial_vars_spec={"user_name": "string"} # Define input spec
         )
         self.interpreter.pil_program = program
-        self.interpreter.context = Context(initial_vars={"user_name": "Alice"})
+        # self.interpreter.context = Context(initial_vars={"user_name": "Alice"}) # Context set by run(inputs=...)
 
-        await self.interpreter.run() # await
+        actual_input_values = {"user_name": "Alice"}
+        await self.interpreter.run(inputs=actual_input_values) # Pass inputs to run
         output = self.interpreter.context.get_variable("tool_output")
         self.assertEqual(output, "Hi, Alice!")
 
-    async def test_tool_with_default_argument(self): # async
+    async def test_tool_with_default_argument(self):
         program = create_tool_test_program("greet_user", {"name": "Bob"})
         self.interpreter.pil_program = program
         self.interpreter.context = Context()
@@ -220,12 +221,13 @@ class TestInterpreterToolStepWithComplexArgs(unittest.IsolatedAsyncioTestCase): 
                 "config": test_config_literal,
                 "active": "{{is_active}}"
             },
-            initial_vars={"task_name": "MixedTask", "is_active": False},
+            initial_vars_spec={"task_name": "string", "is_active": "boolean"}, # Define input spec
             def_var="mixed_output"
         )
         self.interpreter.pil_program = program
-        self.interpreter.context = Context(initial_vars={"task_name": "MixedTask", "is_active": False})
-        await self.interpreter.run() # await
+
+        actual_input_values = {"task_name": "MixedTask", "is_active": False}
+        await self.interpreter.run(inputs=actual_input_values) # Pass inputs to run
 
         expected_output = "MixedTask is inactive."
         self.assertEqual(self.interpreter.context.get_variable("mixed_output"), expected_output)

@@ -15,6 +15,7 @@ class Config:
     model: Optional[str] = None
     api_key: Optional[str] = None # Note: Sensitive, consider environment variables for actual use
     parameters: Dict[str, Any] = field(default_factory=dict) # e.g., temperature, max_tokens
+    max_program_retries: int = 0 # For program-level self-correction
 
     @classmethod
     def from_yaml(cls, data: Optional[YamlData]) -> 'Config':
@@ -24,7 +25,8 @@ class Config:
         return cls(
             model=data.get('model'),
             api_key=data.get('api_key'),
-            parameters=data.get('parameters', {})
+            parameters=data.get('parameters', {}),
+            max_program_retries=int(data.get('max_program_retries', 0)) # Ensure int, default 0
         )
 
 @dataclass
@@ -201,10 +203,11 @@ class LoopStep(BaseStep):
     loop_var_name: Optional[str] = None  # e.g., "item" or "i"
     iterable_var_name: Optional[str] = None  # e.g., "my_list" (name of variable in context)
     range_args_str: Optional[List[str]] = None  # e.g., ["5"] or ["0", "10", "2"] (as strings, to be evaluated later)
-    condition_expr: Optional[str] = None  # e.g., "${count} < 10"
+    condition_expr: Optional[str] = None  # e.g., "{{count}} < 10"
 
     # Regex patterns for parsing loop expressions
-    _FOR_EACH_PATTERN = re.compile(r"^\s*(\w+)\s+in\s+\$\{(\w+)\}\s*$") # "item in ${collection}"
+    # Updated to use {{variable}} for consistency with general templating
+    _FOR_EACH_PATTERN = re.compile(r"^\s*(\w+)\s+in\s+\{\{([\w.]+)\}\}\s*$") # "item in {{collection}}" or "item in {{obj.attr}}"
     _FOR_RANGE_PATTERN = re.compile(r"^\s*(\w+)\s+in\s+range\s*\((.+)\)\s*$") # "i in range(...)"
     _WHILE_PATTERN = re.compile(r"^\s*while\s+(.+)\s*$") # "while condition"
 

@@ -11,12 +11,12 @@ def create_program_level_validation_test_program(
     output_schema_dict: dict = None,
     program_constraints_dict: dict = None,
     workflow_steps: list = None,
-    initial_vars: dict = None,
-    config_dict: dict = None # Allow passing full config
+    # initial_vars: dict = None, # Parameter removed as it's not used by tests in this file
+    config_dict: dict = None
 ) -> PilProgram:
 
     program_dict = {
-        "config": config_dict if config_dict else {} # Use provided config or default
+        "config": config_dict if config_dict else {}
     }
     if output_schema_dict:
         program_dict["outputSchema"] = {"schema": output_schema_dict}
@@ -27,18 +27,14 @@ def create_program_level_validation_test_program(
     if workflow_steps:
         program_dict["workflow"] = {"steps": workflow_steps}
     else:
-        # Default workflow step that produces a string, and defines 'final_res'
-        # which is the default var interpreter.run() returns if no program.output.from is set.
         program_dict["workflow"] = {"steps": [{"code": {"lang":"python", "script": "result = 'default_output'", "def": "final_res"}}]}
 
-    # Ensure 'final_res' is defined if not other steps are present, as interpreter.run() expects it.
-    if not workflow_steps and "output" not in program_dict:
+    if not workflow_steps and "output" not in program_dict: # Ensure output var is defined if default workflow
         program_dict["output"] = {"from": "final_res"}
 
-
-    if initial_vars:
-         program_dict["input"] = {"vars": {k: {"type": type(v).__name__, "value": v} for k,v in initial_vars.items()}}
-
+    # Removed initial_vars logic as it's not used by these tests
+    # if initial_vars:
+    #      program_dict["input"] = {"vars": {k: {"type": type(v).__name__, "value": v} for k,v in initial_vars.items()}}
 
     parser = PilParser()
     return parser.parse_dict(program_dict)
