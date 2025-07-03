@@ -1,0 +1,74 @@
+# PIL Program: RAG-based Question Answering Agent
+
+config:
+  model: openai/gpt-4o-mini # Will be simulated by the interpreter
+  parameters:
+    temperature: 0.1
+
+persona:
+  role: >
+    You are a knowledgeable and helpful AI assistant.
+    Your task is to answer user questions accurately based on
+    the provided context information.
+  style: clear, concise
+  tone: professional
+
+input:
+  vars:
+    question: string
+
+outputSchema:
+  schema:
+    type: object
+    properties:
+      answer:
+        type: string
+        description: "The direct answer to the user's question."
+      source_snippets:
+        type: array
+        items:
+          type: string
+        description: "Contextual snippets used to generate the answer."
+    required: ["answer"]
+
+workflow:
+  steps:
+    - retrieve:
+        from: "internal_knowledge_base" # Will be simulated
+        query: "{{ question }}" # Using Jinja2 syntax
+        k: 3
+        def: "retrieved_context"
+
+    - prompt:
+        text: |
+          Context:
+          """
+          {{ retrieved_context | map(attribute='content') | join('\n---\n') }}
+          """
+
+          Based on the above context, answer the following question: {{ question }}
+        def: "final_answer_llm_output" # Output from LLM directly
+        # constraints: # Example constraint from original doc, not yet fully implemented by interpreter
+        #   custom_validator: "validators.py:check_answer_groundedness"
+
+    - code:
+        lang: python
+        script: |
+          # This script processes the LLM output and the retrieved context
+          # to fit the defined outputSchema.
+          # final_answer_llm_output is the raw string from the LLM.
+          # retrieved_context is a list of dicts, e.g., [{"id": ..., "content": ..., "score": ...}]
+
+          answer_str = final_answer_llm_output  # Use the LLM output directly for the answer
+
+          snippets = []
+          if isinstance(retrieved_context, list):
+              for doc in retrieved_context:
+                  if isinstance(doc, dict) and 'content' in doc:
+                      snippets.append(doc['content'])
+
+          result = {
+              "answer": answer_str,
+              "source_snippets": snippets
+          }
+        def: "output_object" # This variable should match the outputSchema structure.

@@ -1,5 +1,6 @@
 PyYAML>=6.0 # For parsing PIL's YAML-based syntax
-openai>=1.3.0 # For making LLM calls to OpenAI models
+openai>=1.3.0 # For making LLM calls to OpenAI models (optional, for actual LLM calls)
 python-dotenv>=1.0.0 # For managing API keys and configurations from .env files
 Jinja2>=3.0 # For advanced variable substitution and templating
-# jsonschema # For validating outputSchema
+asteval>=0.9.30 # For safe evaluation of Python expressions (e.g., in conditions)
+# jsonschema # For validating outputSchema (consider adding later)
