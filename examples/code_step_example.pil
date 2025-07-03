@@ -1,0 +1,63 @@
+# PIL Program: Code Step Example
+
+config:
+  model: openai/gpt-4o-mini
+  parameters:
+    temperature: 0.0
+
+input:
+  vars:
+    # This value will be provided via CLI: -i input_value=10
+    input_value: int
+
+persona:
+  role: "You are an AI that reports results clearly."
+
+workflow:
+  steps:
+    - code:
+        lang: python
+        # Script expects 'input_value' from PIL context.
+        # It will define 'interim_result' within its scope.
+        script: |
+          print(f"Code step: Received input_value = {input_value}")
+          interim_result = int(input_value) * 100 + 5
+          print(f"Code step: Calculated interim_result = {interim_result}")
+        def: "interim_result" # This tells PIL to pull 'interim_result' from script's scope
+                              # back into the PIL context.
+
+    - prompt:
+        # This prompt will use 'interim_result' which was defined by the code step.
+        text: |
+          The input value was {{ input_value }}.
+          The Python code step calculated an interim result.
+          The calculated interim result is: {{ interim_result }}.
+
+          Please confirm this calculation.
+        def: "llm_confirmation"
+
+    - code:
+        lang: python
+        # This script demonstrates accessing a variable set by an LLM
+        # and a variable set by a previous code step.
+        script: |
+          final_summary = f"Initial input: {input_value}. Calculated by code: {interim_result}. Confirmed by LLM: {llm_confirmation}"
+          print(f"Final summary (from code step): {final_summary}")
+        def: "final_summary_text"
+outputSchema:
+  schema:
+    type: object
+    properties:
+      original_input:
+        type: integer
+      calculated_value:
+        type: integer
+      llm_response:
+        type: string
+      final_summary:
+          type: string
+    required: ["original_input", "calculated_value", "llm_response", "final_summary"]
+
+# To run this example from CLI:
+# Assuming OPENAI_API_KEY is set in .env
+# python -m pil_interpreter examples/code_step_example.pil -i input_value=10 --trace

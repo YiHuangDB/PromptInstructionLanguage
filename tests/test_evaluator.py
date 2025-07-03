@@ -417,3 +417,116 @@ if __name__ == "__main__":
 #     suite.addTest(unittest.makeSuite(TestRetrieveStep))
 #     runner = unittest.TextTestRunner()
 #     runner.run(suite)
+
+
+# --- Tests for _handle_code_step ---
+class TestCodeStep(unittest.TestCase):
+    def setUp(self):
+        self.context = ExecutionContext()
+        self.mock_openai_client = MagicMock(spec=openai.OpenAI) # Evaluator expects it
+        self.program_data_template = {"workflow": {"steps": [{"code": {}}]}}
+
+    def _run_code_step(self, code_config):
+        self.program_data_template["workflow"]["steps"][0]["code"] = code_config
+        evaluator = Evaluator(self.program_data_template, self.context, self.mock_openai_client)
+        # Using @patch on the method or a context manager for print if needed for assertions
+        # For now, let prints go to stdout for these tests unless asserting specific prints
+        evaluator.run_workflow()
+
+    def test_code_step_successful_execution_with_def(self):
+        self.context.set_variable("x", 10)
+        self.context.set_variable("y", 5)
+        script = "result = x * y + 2"
+        config = {"lang": "python", "script": script, "def": "result"}
+
+        self._run_code_step(config)
+
+        self.assertEqual(self.context.get_variable("result"), 52)
+
+    def test_code_step_successful_execution_no_def(self):
+        self.context.set_variable("my_list", [])
+        # This script modifies 'my_list' in the execution_scope.
+        # The current implementation of _handle_code_step uses execution_scope = self.context.variables.copy()
+        # so direct modification of mutable objects in context won't happen unless we change that.
+        # For this test to pass as expected (my_list in context NOT changed), this is correct.
+        # If we wanted in-place modification of context vars, exec_scope would need to be self.context.variables.
+        script = "my_list.append(123)" # This operates on a copy if my_list is passed as part of execution_scope
+                                      # If my_list was a global or a more complex setup, it might differ.
+                                      # With current copy(), this won't modify original context.my_list
+                                      # This test is to confirm that.
+
+        # Let's test a script that defines a var but it's not captured by 'def'
+        script_defines_var = "internal_var = 42"
+        config_no_def = {"lang": "python", "script": script_defines_var}
+        initial_vars_count = len(self.context.variables)
+
+        self._run_code_step(config_no_def)
+
+        self.assertIsNone(self.context.get_variable("internal_var")) # Not captured
+        self.assertEqual(len(self.context.variables), initial_vars_count)
+
+
+    def test_code_step_def_variable_not_in_script_scope(self):
+        script = "a = 10"
+        # 'def' refers to 'b', but script only defines 'a'
+        config = {"lang": "python", "script": script, "def": "b"}
+
+        with patch('sys.stderr', new_callable=StringIO) as mock_stderr:
+            self._run_code_step(config)
+            self.assertIn("Warning: Variable 'b' specified in 'def' was not found", mock_stderr.getvalue())
+        self.assertIsNone(self.context.get_variable("b")) # 'b' should not be in context or be None
+
+    def test_code_step_syntax_error_in_script(self):
+        script = "a = 10 + " # Syntax error
+        config = {"lang": "python", "script": script, "def": "a"}
+        with self.assertRaisesRegex(PILSyntaxError, "Syntax error in Python code step"):
+            self._run_code_step(config)
+
+    def test_code_step_name_error_in_script_from_pil_context(self):
+        # 'z' is not defined in PIL context nor in script before use
+        script = "a = z + 10"
+        config = {"lang": "python", "script": script, "def": "a"}
+        with self.assertRaisesRegex(PILSemanticError, "NameError in Python code step"):
+            self._run_code_step(config)
+
+    def test_code_step_unsupported_language(self):
+        config = {"lang": "javascript", "script": "var a = 10;", "def": "a"}
+        with self.assertRaisesRegex(PILSemanticError, "Unsupported language 'javascript'"):
+            self._run_code_step(config)
+
+    def test_code_step_missing_script(self):
+        config = {"lang": "python", "def": "a"} # Missing 'script'
+        with self.assertRaisesRegex(PILSemanticError, "must have a 'script' field"):
+            self._run_code_step(config)
+
+    def test_code_step_script_not_string(self):
+        config = {"lang": "python", "script": 123, "def": "a"}
+        with self.assertRaisesRegex(PILSemanticError, "must have a 'script' field as a non-empty string"):
+            self._run_code_step(config)
+
+    def test_code_step_invalid_def_type(self):
+        config = {"lang": "python", "script": "a=1", "def": 123} # def is not a string
+        with self.assertRaisesRegex(PILSemanticError, "Code step 'def' field, if provided, must be a string"):
+            self._run_code_step(config)
+
+    def test_code_step_script_modifies_copied_scope_not_original_context_directly(self):
+        # This test confirms that the script operates on a copy of the context variables,
+        # and direct modifications to that scope (for mutable types) don't automatically
+        # reflect in the original context, unless explicitly captured by 'def'.
+        original_list = [1, 2]
+        self.context.set_variable("test_list", original_list)
+
+        # This script will modify 'test_list' within its own execution_scope
+        script = "test_list.append(3); new_var = test_list"
+        config = {"lang": "python", "script": script, "def": "new_var"}
+
+        self._run_code_step(config)
+
+        # The original list in the context should be unchanged
+        self.assertEqual(self.context.get_variable("test_list"), [1, 2])
+        # new_var in context should be the modified list from script's scope
+        self.assertEqual(self.context.get_variable("new_var"), [1, 2, 3])
+
+
+if __name__ == "__main__":
+    unittest.main()

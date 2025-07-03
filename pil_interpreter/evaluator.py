@@ -142,6 +142,60 @@ class Evaluator:
         self.context.set_variable(output_var_name, final_docs)
         print(f"    Retrieved {len(final_docs)} documents and stored in context variable: '{output_var_name}'")
 
+    def _handle_code_step(self, step_config: dict):
+        if not isinstance(step_config, dict):
+            raise PILSemanticError("Code step configuration must be a dictionary.")
+
+        lang = step_config.get("lang")
+        script_content = step_config.get("script")
+        output_var_name = step_config.get("def") # This is the variable name *inside the script* to capture
+
+        if lang != "python":
+            raise PILSemanticError(f"Unsupported language '{lang}' in code step. Only 'python' is supported.")
+        if not script_content or not isinstance(script_content, str):
+            raise PILSemanticError("Code step must have a 'script' field as a non-empty string.")
+        if output_var_name and not isinstance(output_var_name, str):
+            raise PILSemanticError("Code step 'def' field, if provided, must be a string (variable name).")
+
+        # Prepare the execution scope. Start with a copy of current context variables.
+        # This provides read access to context variables.
+        # Using deepcopy to prevent unintentional modification of mutable objects
+        # in the original context via the script's execution_scope.
+        import copy
+        execution_scope = copy.deepcopy(self.context.variables)
+
+        # Add a way for the script to potentially signal back multiple results if needed,
+        # though 'def' focuses on one primary output.
+        # For now, we won't pass the whole context object to avoid tight coupling or accidental modification.
+
+        print(f"    Executing Python script (first 50 chars): \"{script_content[:50]}{'...' if len(script_content)>50 else ''}\"")
+
+        try:
+            # Execute the script. The script operates on the execution_scope dictionary.
+            # Globals and locals are the same here for simplicity.
+            exec(script_content, execution_scope, execution_scope)
+        except SyntaxError as e:
+            raise PILSyntaxError(f"Syntax error in Python code step: {e}")
+        except NameError as e:
+            # This catches NameError if the script tries to access a variable not in execution_scope
+            # (i.e., not in PIL context or defined within the script before use)
+            raise PILSemanticError(f"NameError in Python code step: {e}. Ensure variables are defined in PIL context or script.")
+        except Exception as e: # Catch other runtime errors from the script
+            raise PILError(f"Error during Python code step execution: {e}")
+
+        # If 'def' is specified, retrieve that variable from the execution_scope
+        # and store it back into the main PIL context.
+        if output_var_name:
+            if output_var_name in execution_scope:
+                result_value = execution_scope[output_var_name]
+                self.context.set_variable(output_var_name, result_value)
+                print(f"    Stored script variable '{output_var_name}' into PIL context.")
+            else:
+                # This means the script was supposed to define/calculate 'output_var_name' but didn't.
+                print(f"    Warning: Variable '{output_var_name}' specified in 'def' was not found in the script's execution scope after execution.", file=sys.stderr)
+                # Optionally, set it to None in context or raise an error, depending on desired strictness.
+                # For now, just a warning and it won't be set in context if not found.
+                # self.context.set_variable(output_var_name, None) # Or raise PILSemanticError
 
     def _handle_prompt_step(self, step_config: dict):
         if not isinstance(step_config, dict):
@@ -240,10 +294,10 @@ class Evaluator:
                 self._handle_prompt_step(step_config)
             elif step_type == "retrieve":
                 self._handle_retrieve_step(step_config)
+            elif step_type == "code":
+                self._handle_code_step(step_config)
             elif step_type == "tool":
                 print(f"  Tool step found. Config: {step_config}") # Placeholder
-            elif step_type == "code":
-                print(f"  Code step found. Config: {step_config}") # Placeholder
             else:
                 print(f"  Warning: Unknown step type '{step_type}' at step {i+1}. Content: {step_config}", file=sys.stderr)
 
