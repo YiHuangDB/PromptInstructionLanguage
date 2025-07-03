@@ -674,8 +674,8 @@ class Interpreter:
                     elif isinstance(e_val, ConstraintViolationError) and self.pil_program.constraints:
                          error_info_str += f" Expected Constraints: {str(self.pil_program.constraints)[:200]}..."
 
-                    current_inputs = original_inputs.copy() # Start with original inputs for next retry
-                    current_inputs["pil_last_error_info"] = error_info_str
+                    current_inputs_for_attempt = base_inputs_for_this_run_cycle.copy() # Reset to base for the new attempt
+                    current_inputs_for_attempt["pil_last_error_info"] = error_info_str # Add error info
 
                     self._add_trace_log("PROGRAM_RETRYING", attempt=current_retry_count + 1, error_info_for_next_run=error_info_str)
                     print(f"Interpreter: Retrying program (attempt {current_retry_count}/{max_retries}). Error info will be available as 'pil_last_error_info'.")

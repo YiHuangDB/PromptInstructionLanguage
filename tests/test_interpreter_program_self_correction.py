@@ -71,10 +71,13 @@ class TestInterpreterProgramSelfCorrection(unittest.IsolatedAsyncioTestCase):
 
         # Script will check for 'pil_last_error_info' and change behavior
         script_def = """
-if 'pil_last_error_info' in dir() and pil_last_error_info:
-    result = {"data": "corrected_valid_data"} # Correct output on retry
-else:
-    result = {"data": 123} # Invalid output first time (string expected)
+try:
+    if pil_last_error_info: # Rely on non-empty string being True
+        result = {"data": "corrected_valid_data"}
+    else:
+        result = {"data": 123} # Should ideally not be hit if error info is always non-empty
+except NameError: # pil_last_error_info not defined (first run)
+    result = {"data": 123}
 """
         steps = [{"code": {"lang": "python", "script": script_def, "def": "final_res"}}]
         schema = {"type": "object", "properties": {"data": {"type": "string"}}, "required": ["data"]}
@@ -114,10 +117,13 @@ else:
     async def test_top_level_constraint_error_triggers_retry_and_succeeds(self):
         """Program passes schema but fails top-level constraints, retries, then succeeds."""
         script_def = """
-if 'pil_last_error_info' in dir() and pil_last_error_info:
-    result = "valid_final_string" # Correct output on retry
-else:
-    result = "short" # Fails length constraint on first try
+try:
+    if pil_last_error_info: # Rely on non-empty string being True
+        result = "valid_final_string"
+    else:
+        result = "short" # Should ideally not be hit
+except NameError: # pil_last_error_info not defined (first run)
+    result = "short"
 """
         steps = [{"code": {"lang": "python", "script": script_def, "def": "final_res"}}]
         # output_schema is simple, will pass "short"
