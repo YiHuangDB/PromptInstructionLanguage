@@ -1,0 +1,38 @@
+[
+  {
+    "id": "doc1",
+    "title": "About Paris",
+    "content": "Paris is the capital and most populous city of France. It is known for fashion, art, and the Eiffel Tower.",
+    "tags": ["city", "france", "europe"]
+  },
+  {
+    "id": "doc2",
+    "title": "Weather in France",
+    "content": "The weather in France varies greatly. Paris usually has mild weather, especially in spring and autumn.",
+    "tags": ["weather", "france", "seasons"]
+  },
+  {
+    "id": "doc3",
+    "title": "London Information",
+    "content": "London, the capital of England and the United Kingdom, is a 21st-century city with history stretching back to Roman times.",
+    "tags": ["city", "uk", "europe"]
+  },
+  {
+    "id": "doc4",
+    "title": "Skiing in France",
+    "content": "France offers excellent skiing opportunities in the Alps. Spring skiing can be very enjoyable.",
+    "tags": ["sport", "france", "mountains", "winter", "spring"]
+  },
+  {
+    "id": "doc5",
+    "title": "Empty Content Test",
+    "content": "",
+    "tags": ["special_case"]
+  },
+  {
+    "id": "doc6",
+    "title": "Another Paris Document",
+    "content": "Exploring Paris offers a rich cultural experience. The city of Paris is vibrant.",
+    "tags": ["city", "france", "culture"]
+  }
+]

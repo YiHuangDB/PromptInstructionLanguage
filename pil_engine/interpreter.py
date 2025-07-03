@@ -10,6 +10,7 @@ from .utils import render_template_string, safe_eval_code_string
 
 import os
 import openai # Added for actual LLM client
+import re # Added for tokenization in retrieval
 
 # --- Conceptual Debugging Strategy Notes for Interpreter ---
 # (Already detailed in previous step, summarized here for context)
@@ -110,12 +111,10 @@ class Interpreter:
         self.llm_client: Any = None
         self.debug_mode: bool = debug_mode
         self.trace_log: List[Dict[str, Any]] = [] if self.debug_mode else None
+        self.knowledge_bases: Dict[str, List[Dict[str, Any]]] = {}
 
-        # LLM client initialization is now more involved and might depend on API keys loaded via dotenv,
-        # so it's better to call it as part of the run, or ensure dotenv is loaded before Interpreter instantiation.
-        # For now, let's keep it here but be mindful of when API keys become available.
-        # We'll also need to import 'os' and 'openai'.
         self._initialize_llm_client()
+        self._load_all_knowledge_bases()
 
     def _add_trace_log(self, event_type: str, **kwargs):
         """Adds a structured entry to the trace log if debug_mode is enabled."""
@@ -165,6 +164,64 @@ class Interpreter:
             self._add_trace_log("LLM_CLIENT_INIT_ERROR", model=model_name, error=str(e))
             print(f"Interpreter: Error initializing OpenAI client for model '{model_name}': {e}")
 
+    def _load_knowledge_base(self, file_path: str) -> List[Dict[str, Any]]:
+        """Loads a single JSON knowledge base file."""
+        try:
+            # Consider security implications if file_path can be arbitrary.
+            # For now, assume it's a trusted path from the PIL program.
+            # Resolve relative paths if necessary, e.g., relative to PIL program location or CWD.
+            # Current CWD is default for open().
+            with open(file_path, 'r', encoding='utf-8') as f:
+                kb_data = yaml.safe_load(f) # Using yaml.safe_load for consistency, works for JSON too
+            if not isinstance(kb_data, list):
+                raise ValueError(f"Knowledge base file '{file_path}' must contain a JSON list of documents.")
+            for doc in kb_data:
+                if not isinstance(doc, dict) or "id" not in doc or "content" not in doc:
+                    raise ValueError(f"Invalid document structure in '{file_path}'. Each doc needs 'id' and 'content'. Document: {doc}")
+            self._add_trace_log("KB_LOAD_SUCCESS", source=file_path, num_docs=len(kb_data))
+            print(f"Interpreter: Knowledge Base '{file_path}' loaded with {len(kb_data)} documents.")
+            return kb_data
+        except FileNotFoundError:
+            self._add_trace_log("KB_LOAD_ERROR", source=file_path, error="File not found")
+            raise FileNotFoundError(f"Knowledge base file not found: {file_path}")
+        except (yaml.YAMLError, ValueError) as e: # Catch JSON parsing errors or our ValueErrors
+            self._add_trace_log("KB_LOAD_ERROR", source=file_path, error=str(e))
+            raise ValueError(f"Error loading or parsing knowledge base '{file_path}': {e}")
+        except Exception as e:
+            self._add_trace_log("KB_LOAD_ERROR", source=file_path, error=f"Unexpected error: {str(e)}")
+            raise RuntimeError(f"Unexpected error loading knowledge base '{file_path}': {e}")
+
+    def _collect_kb_sources_from_steps(self, steps: List[StepType]) -> set[str]:
+        """Recursively collects all unique 'from_source' paths from RetrieveSteps."""
+        sources = set()
+        for step in steps:
+            if isinstance(step, RetrieveStep):
+                sources.add(step.from_source)
+            elif isinstance(step, IfStep):
+                sources.update(self._collect_kb_sources_from_steps(step.then_steps))
+                sources.update(self._collect_kb_sources_from_steps(step.else_steps))
+            elif isinstance(step, LoopStep):
+                sources.update(self._collect_kb_sources_from_steps(step.steps))
+        return sources
+
+    def _load_all_knowledge_bases(self):
+        """Loads all knowledge bases specified in RetrieveSteps within the program."""
+        if not self.pil_program.workflow or not self.pil_program.workflow.steps:
+            return
+
+        kb_sources = self._collect_kb_sources_from_steps(self.pil_program.workflow.steps)
+
+        for source_path in kb_sources:
+            if source_path not in self.knowledge_bases: # Avoid reloading if already loaded (e.g. by a previous call or manual setup)
+                try:
+                    self.knowledge_bases[source_path] = self._load_knowledge_base(source_path)
+                except Exception as e:
+                    # Decide on error handling: warn, or raise immediately?
+                    # Raising immediately makes misconfiguration obvious.
+                    print(f"Interpreter Warning: Failed to load knowledge base '{source_path}': {e}. Retrieval from this source will fail.")
+                    # Optionally, re-raise to halt if a KB is critical: raise
+                    # For now, let it proceed and fail at RetrieveStep if source is missing.
+                    self.knowledge_bases[source_path] = None # Mark as failed to load
 
     def _validate_inputs(self, provided_inputs: Dict[str, Any]):
         """
@@ -329,9 +386,51 @@ class Interpreter:
         self._add_trace_log("TEMPLATE_RENDERED", step_type="RetrieveStep", original_query=step.query, rendered_query=rendered_query)
         print(f"    - Retrieval: from='{step.from_source}', query='{rendered_query}', k={step.k}")
 
-        simulated_retrieval = [{"id": f"doc_{i+1}", "content": f"Simulated content for query '{rendered_query}' - doc {i+1}", "score": 1.0 - (i*0.1)} for i in range(step.k)]
-        self._add_trace_log("RETRIEVAL_SIMULATED", source=step.from_source, query=rendered_query, k=step.k, result_count=len(simulated_retrieval))
-        return simulated_retrieval
+        knowledge_base = self.knowledge_bases.get(step.from_source)
+        if knowledge_base is None:
+            # This means KB failed to load or wasn't specified correctly.
+            # _load_all_knowledge_bases would have printed a warning.
+            self._add_trace_log("RETRIEVAL_FAILED", source=step.from_source, query=rendered_query, reason="Knowledge base not loaded or unavailable.")
+            print(f"    - WARNING: Knowledge base '{step.from_source}' not loaded. Returning empty list for retrieval.")
+            return []
+
+        if not knowledge_base: # Empty KB
+            self._add_trace_log("RETRIEVAL_EMPTY_KB", source=step.from_source, query=rendered_query)
+            return []
+        # Simple keyword matching
+        # Ensure tokenize is indented correctly within _execute_retrieve_step
+        def tokenize(text: str) -> set[str]:
+            if not isinstance(text, str): # Handle non-string input to tokenize gracefully
+                text = str(text)
+            text = re.sub(r'[^\w\s]', '', text) # Remove punctuation
+            return set(word for word in text.lower().split() if word) # Filter out empty strings from multiple spaces
+
+        query_tokens = tokenize(rendered_query)
+
+        scored_documents = []
+        for doc in knowledge_base:
+            doc_content = doc.get("content", "")
+            # Tokenization will handle non-string conversion if needed, but good to ensure content is primarily string
+            # if not isinstance(doc_content, str):
+            #     doc_content = str(doc_content)
+
+            doc_tokens = tokenize(doc_content)
+            common_tokens = query_tokens.intersection(doc_tokens)
+            score = len(common_tokens) # Simple count of common unique keywords
+
+            if score > 0:
+                # Return a copy of the doc to avoid modifying the cached KB, add score
+                retrieved_doc_item = doc.copy()
+                retrieved_doc_item["score"] = float(score)
+                scored_documents.append(retrieved_doc_item)
+
+        # Sort by score descending
+        scored_documents.sort(key=lambda x: x["score"], reverse=True)
+
+        results = scored_documents[:step.k]
+
+        self._add_trace_log("RETRIEVAL_EXECUTED", source=step.from_source, query=rendered_query, k=step.k, result_count=len(results), total_matches_before_k=len(scored_documents))
+        return results
 
     def _execute_tool_step(self, step: ToolStep) -> Any:
         context_vars = self.context.get_all_variables()
