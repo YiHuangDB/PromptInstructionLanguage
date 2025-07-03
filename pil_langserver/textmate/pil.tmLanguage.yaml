@@ -1,0 +1,145 @@
+# TextMate Grammar for PIL (Prompt Instruction Language)
+# Based on YAML structure
+
+scopeName: 'source.pil.yaml' # Assuming PIL programs are YAML files, or use 'source.pil' if dedicated .pil files
+fileTypes: ['pil', 'pil.yaml', 'pilyaml'] # Common extensions
+
+patterns:
+  - include: '#main_pil_structure'
+
+repository:
+  # Comments (Standard YAML)
+  comments:
+    name: 'comment.line.number-sign.yaml'
+    match: '(#).*$\n?'
+    captures:
+      '1':
+        name: 'punctuation.definition.comment.yaml'
+
+  # Variable Templating {{ ... }}
+  variable_templating:
+    name: 'meta.expression.interpolated.pil'
+    begin: '\{\{'
+    end: '\}\}'
+    beginCaptures:
+      '0':
+        name: 'punctuation.definition.template-expression.begin.pil'
+    endCaptures:
+      '0':
+        name: 'punctuation.definition.template-expression.end.pil'
+    patterns: # Content inside {{ }} - can be simple variable or more complex
+      - name: 'variable.other.placeholder.pil'
+        match: '\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*' # Matches variable names like var or obj.attr
+      # Add more specific rules for expressions inside {{ }} if needed later
+
+  # Basic YAML string types for values, to be included where values are expected
+  # Quoted strings are important to differentiate from keywords
+  quoted_string_double:
+    name: 'string.quoted.double.yaml'
+    begin: '"'
+    end: '"'
+    patterns:
+      - name: 'constant.character.escape.yaml'
+        match: '\\.'
+      - include: '#variable_templating' # Allow templating within strings
+
+  quoted_string_single:
+    name: 'string.quoted.single.yaml'
+    begin: "'"
+    end: "'"
+    patterns:
+      - name: 'constant.character.escape.yaml' # Though single quotes have fewer escapes
+        match: "''" # Escaped single quote
+      - include: '#variable_templating'
+
+  # Keywords for PIL structure
+  pil_keywords:
+    patterns:
+      # Top Level Keys
+      - name: 'entity.name.section.config.pil'
+        match: '^\s*(config)(:)'
+        captures:
+          '1': { name: 'keyword.control.pil' } # More specific than just entity.name.section
+          '2': { name: 'punctuation.separator.key-value.yaml' }
+      - name: 'entity.name.section.persona.pil'
+        match: '^\s*(persona)(:)'
+        captures:
+          '1': { name: 'keyword.control.pil' }
+          '2': { name: 'punctuation.separator.key-value.yaml' }
+      - name: 'entity.name.section.input.pil'
+        match: '^\s*(input)(:)'
+        captures:
+          '1': { name: 'keyword.control.pil' }
+          '2': { name: 'punctuation.separator.key-value.yaml' }
+      - name: 'entity.name.section.outputschema.pil'
+        match: '^\s*(outputSchema)(:)'
+        captures:
+          '1': { name: 'keyword.control.pil' }
+          '2': { name: 'punctuation.separator.key-value.yaml' }
+      - name: 'entity.name.section.workflow.pil'
+        match: '^\s*(workflow)(:)'
+        captures:
+          '1': { name: 'keyword.control.pil' }
+          '2': { name: 'punctuation.separator.key-value.yaml' }
+      - name: 'entity.name.section.constraints.pil' # Top-level constraints
+        match: '^\s*(constraints)(:)'
+        captures:
+          '1': { name: 'keyword.control.pil' }
+          '2': { name: 'punctuation.separator.key-value.yaml' }
+
+      # Step Type Keys (usually followed by a colon, under 'steps:')
+      # These need to be context-aware (e.g. only under 'steps:')
+      # For simplicity now, just matching the keywords. Context can be added with more complex begin/end patterns.
+      - name: 'keyword.control.step.pil' # Generic step keyword
+        match: '^\s*-\s*(prompt|retrieve|tool|code|if|for|while|loop)(:)'
+        captures:
+          '1': { name: 'keyword.control.pil' } # Specific type of keyword
+          '2': { name: 'punctuation.separator.key-value.yaml' }
+
+      # Common parameters within steps or other blocks (like 'def', 'name', 'type')
+      # These are very generic, so their context is important.
+      # Matching them as keywords when they appear as YAML keys.
+      - name: 'variable.parameter.pil'
+        match: '^\s*(model|api_key|parameters|role|style|tone|audience|vars|schema|steps|text|examples|max_retries|from|query|k|args|lang|script|condition|then|else|expression|def|name|type|regex|choices|custom_validator)(:)'
+        captures:
+          '1': { name: 'keyword.other.pil' } # Or more specific like variable.parameter.pil
+          '2': { name: 'punctuation.separator.key-value.yaml' }
+
+  # Basic YAML structural elements (subset, good enough for PIL context)
+  yaml_structure:
+    patterns:
+      - name: 'punctuation.definition.list.item.yaml'
+        match: '^\s*-\s+'
+      # Key-value pair (generic, PIL keywords will take precedence if matched first)
+      - name: 'meta.mapping.key-value.yaml'
+        match: '^\s*([a-zA-Z0-9_.-]+)\s*(:)'
+        captures:
+          '1': { name: 'entity.name.tag.yaml' } # Generic YAML key
+          '2': { name: 'punctuation.separator.key-value.yaml' }
+      # Boolean values
+      - name: 'constant.language.boolean.yaml'
+        match: '\b(true|True|TRUE|false|False|FALSE|yes|Yes|YES|no|No|NO|on|On|ON|off|Off|OFF)\b'
+      # Numeric values
+      - name: 'constant.numeric.yaml'
+        match: '\b[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?\b'
+      # Null values
+      - name: 'constant.language.null.yaml'
+        match: '\b(null|Null|NULL|~)\b'
+      # Unquoted strings (catch-all for values, should be after specific constants)
+      - include: '#quoted_string_double'
+      - include: '#quoted_string_single'
+      # Simple unquoted strings that don't look like other tokens
+      # This match is intentionally broad for values that are not explicitly quoted or typed.
+      # It assumes values often start with a letter or underscore, or are simple paths/identifiers.
+      # It tries not to consume leading/trailing whitespace which YAML structure handles.
+      - name: 'string.unquoted.pil-value.yaml'
+        match: '(?<=[>|:\s])([a-zA-Z_@][a-zA-Z0-9_.:/\-\s]*[a-zA-Z0-9_.:/\-])|[a-zA-Z_@][a-zA-Z0-9_.:/\-]*'
+
+
+  # Main PIL structure: combination of PIL keywords and general YAML
+  main_pil_structure:
+    patterns:
+      - include: '#comments'
+      - include: '#pil_keywords' # PIL specific keywords should take precedence
+      - include: '#variable_templating' # Templating can appear in many string values
+      - include: '#yaml_structure' # General YAML elements
