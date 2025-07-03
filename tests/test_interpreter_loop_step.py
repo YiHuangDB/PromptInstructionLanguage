@@ -27,22 +27,23 @@ def create_loop_test_program(loop_yaml_snippet: Dict[str, Any], initial_vars: Di
     parser = PilParser()
     return parser.parse_dict(program_dict)
 
-class TestInterpreterLoopStep(unittest.TestCase):
+class TestInterpreterLoopStep(unittest.IsolatedAsyncioTestCase): # Changed base class
 
-    @patch('openai.OpenAI') # Mock OpenAI for tests involving PromptStep
-    def test_for_each_loop_simple_list(self, MockOpenAI):
-        # Configure the mock client
-        mock_client_instance = MockOpenAI.return_value
-        mock_completion = MagicMock()
+    @patch('openai.AsyncOpenAI') # Changed to AsyncOpenAI
+    async def test_for_each_loop_simple_list(self, MockAsyncOpenAI): # Made test async
+        # Configure the mock async client
+        mock_client_instance = MockAsyncOpenAI.return_value
+
         # Simulate different responses based on input to distinguish iterations
-        def side_effect_func(*args, **kwargs):
-            prompt_content = kwargs['messages'][-1]['content'] # Get the user prompt
-            mock_resp = MagicMock()
+        async def async_side_effect_func(*args, **kwargs): # Made side_effect async
+            prompt_content = kwargs['messages'][-1]['content']
+            mock_resp = MagicMock() # The response object itself doesn't need to be async for the mock
             mock_resp.choices = [MagicMock(message=MagicMock(content=f"Mocked: {prompt_content}"))]
             return mock_resp
-        mock_client_instance.chat.completions.create.side_effect = side_effect_func
 
-        # The loop_yaml_snippet IS the step definition itself
+        # Assign an AsyncMock to the create method with the async side_effect
+        mock_client_instance.chat.completions.create = unittest.mock.AsyncMock(side_effect=async_side_effect_func)
+
         loop_yaml_snippet = {
             "for": "item in ${my_items}",
             "steps": [
@@ -54,10 +55,9 @@ class TestInterpreterLoopStep(unittest.TestCase):
         program = create_loop_test_program(loop_yaml_snippet, initial_vars=initial_context_vars, include_llm_config=True)
 
         interpreter = Interpreter(pil_program=program, initial_vars=initial_context_vars, debug_mode=False)
-        # Ensure the mock is correctly configured by _initialize_llm_client
-        MockOpenAI.assert_called_with(api_key="dummy_test_key_for_mocking")
+        MockAsyncOpenAI.assert_called_with(api_key="dummy_test_key_for_mocking") # Updated mock name
 
-        final_output = interpreter.run()
+        final_output = await interpreter.run() # Added await
 
         loop_output_in_context = interpreter.context.get_variable("loop_results")
         self.assertIsInstance(loop_output_in_context, list)
@@ -173,49 +173,116 @@ class TestInterpreterLoopStep(unittest.TestCase):
         # The variable 'current_iter_output' itself, from the step's def, should also be scoped to the iteration.
         self.assertFalse(interpreter.context.has_variable("current_iter_output"))
 
+    async def test_for_range_loop_single_arg(self): # async
+        loop_yaml_snippet = {
+            "for": "i in range(3)",
+            "steps": [
+                {"code": {"lang": "python", "script": "result = i * 2", "def": "iter_res"}}
+            ],
+            "def": "range_loop_output"
+        }
+        program = create_loop_test_program(loop_yaml_snippet)
+        interpreter = Interpreter(pil_program=program, debug_mode=False)
+        await interpreter.run() # await
 
-    def test_for_each_empty_list(self):
+        loop_results = interpreter.context.get_variable("range_loop_output")
+        self.assertEqual(loop_results, [0, 2, 4]) # 0*2, 1*2, 2*2
+
+    async def test_for_range_loop_dynamic_args(self): # async
+        loop_yaml_snippet = {
+            "for": "val in range({{start_val}}, {{end_val}})",
+            "steps": [
+                {"code": {"lang": "python", "script": "result = val + 1", "def": "current_val"}}
+            ],
+            "def": "range_results_dynamic"
+        }
+        initial_vars = {"start_val": 1, "end_val": 4}
+        program = create_loop_test_program(loop_yaml_snippet, initial_vars=initial_vars)
+        interpreter = Interpreter(pil_program=program, initial_vars=initial_vars, debug_mode=False)
+        await interpreter.run() # await
+
+        loop_output = interpreter.context.get_variable("range_results_dynamic")
+        self.assertEqual(loop_output, [2, 3, 4])
+
+    async def test_while_loop_simple_condition(self): # async
+        loop_yaml_snippet_final = {
+             "while": "{{counter}} < 3",
+             "steps": [
+                 {"code": {"lang": "python", "script": "result = counter + 1", "def": "counter"}},
+                 {"code": {"lang": "python", "script": "result = counter - 1", "def": "value_to_collect_is_old_counter"}}
+             ],
+             "def": "while_loop_res"
+        }
+
+        initial_vars = {"counter": 0}
+        program = create_loop_test_program(loop_yaml_snippet_final, initial_vars=initial_vars)
+        interpreter = Interpreter(pil_program=program, initial_vars=initial_vars, debug_mode=False)
+        await interpreter.run() # await
+
+        loop_output = interpreter.context.get_variable("while_loop_res")
+        self.assertEqual(loop_output, [0, 1, 2])
+        self.assertEqual(interpreter.context.get_variable("counter"), 3)
+        self.assertTrue(interpreter.context.has_variable("value_to_collect_is_old_counter"))
+        self.assertEqual(interpreter.context.get_variable("value_to_collect_is_old_counter"), 2)
+
+    async def test_loop_variable_scoping_for_each(self): # async
+        loop_yaml_snippet = {
+            "for": "item in ${my_list}",
+            "steps": [
+                {"code": {"lang": "python", "script": "result = item * 10", "def": "inner_var_in_context"}},
+                {"code": {"lang": "python", "script": "result = {{inner_var_in_context}}", "def": "current_iter_output"}}
+            ],
+            "def": "collected_outputs"
+        }
+        initial_vars = {"my_list": [1, 2]}
+        program = create_loop_test_program(loop_yaml_snippet, initial_vars=initial_vars)
+        interpreter = Interpreter(pil_program=program, initial_vars=initial_vars, debug_mode=True)
+        await interpreter.run() # await
+
+        results = interpreter.context.get_variable("collected_outputs")
+        self.assertEqual(results, [10, 20])
+        self.assertFalse(interpreter.context.has_variable("inner_var_in_context"))
+        self.assertFalse(interpreter.context.has_variable("current_iter_output"))
+
+    async def test_for_each_empty_list(self): # async
         loop_yaml_snippet = {
             "for": "item in ${empty_list}",
-            "steps": [{"prompt": {"text": "This should not run", "def": "dummy"}}],
+            "steps": [{"prompt": {"text": "This should not run", "def": "dummy"}}], # Will warn about no LLM config
             "def": "loop_output_empty"
         }
         initial_vars = {"empty_list": []}
         program = create_loop_test_program(loop_yaml_snippet, initial_vars=initial_vars)
         interpreter = Interpreter(pil_program=program, initial_vars=initial_vars)
-        interpreter.run()
+        await interpreter.run() # await
 
         results = interpreter.context.get_variable("loop_output_empty")
         self.assertEqual(results, [])
 
-    def test_while_loop_condition_initially_false(self):
+    async def test_while_loop_condition_initially_false(self): # async
         loop_yaml_snippet = {
-            "while": "{{flag}} == True", # flag is false. Changed to {{...}} and True
-            "steps": [{"prompt": {"text": "Not executed", "def": "dummy"}}],
+            "while": "{{flag}} == True",
+            "steps": [{"prompt": {"text": "Not executed", "def": "dummy"}}], # Will warn
             "def": "while_false_output"
         }
         initial_vars = {"flag": False}
         program = create_loop_test_program(loop_yaml_snippet, initial_vars=initial_vars)
         interpreter = Interpreter(pil_program=program, initial_vars=initial_vars)
-        interpreter.run()
+        await interpreter.run() # await
 
         results = interpreter.context.get_variable("while_false_output")
         self.assertEqual(results, [])
 
-    def test_loop_without_def_var(self):
+    async def test_loop_without_def_var(self): # async
         loop_yaml_snippet = {
             "for": "i in range(1)",
             "steps": [
                  {"code": {"lang": "python", "script": "side_effect_var = i + 100"}}
             ]
-            # No "def" for the loop itself
         }
         program = create_loop_test_program(loop_yaml_snippet)
         interpreter = Interpreter(pil_program=program)
-        interpreter.run() # Should run without error
+        await interpreter.run() # await
 
-        # The loop itself doesn't put anything in context if 'def' is missing
-        # We can check for a side effect if the language supported modifying outer context,
         # but Python CodeStep uses asteval, which sandboxes.
         # Here, we primarily test that it runs and doesn't try to def a variable.
         # The 'side_effect_var' would be in the iteration's sandbox context, not the main one.
@@ -225,49 +292,45 @@ class TestInterpreterLoopStep(unittest.TestCase):
         self.assertFalse(any(k.startswith("loop_") for k in interpreter.context.get_all_variables().keys()),
                          "No default loop output variable should be created if 'def' is missing.")
 
-
-    def test_for_range_loop_with_step(self):
+    async def test_for_range_loop_with_step(self): # async
         loop_yaml_snippet = {
-            "for": "k in range(1, 6, 2)", # Should be 1, 3, 5
+            "for": "k in range(1, 6, 2)",
             "steps": [{"code": {"lang": "python", "script": "result = k", "def": "v"}}],
             "def": "range_step_results"
         }
         program = create_loop_test_program(loop_yaml_snippet)
         interpreter = Interpreter(pil_program=program)
-        interpreter.run()
+        await interpreter.run() # await
         self.assertEqual(interpreter.context.get_variable("range_step_results"), [1, 3, 5])
 
-    def test_nested_loops(self):
-        # This test also implicitly tests context handling in nested scenarios
-        # The inner loop_yaml_snippet IS the step definition for the inner loop
+    async def test_nested_loops(self): # async
         outer_loop_yaml_snippet = {
-            "for": "i in range(2)", # Outer loop: i = 0, 1
+            "for": "i in range(2)",
             "steps": [
-                { # This is the inner loop step definition
-                    "for": "j in range(2)", # Inner loop: j = 0, 1
+                {
+                    "for": "j in range(2)",
                     "steps": [
                         {"code": {"lang": "python", "script": "result = (i * 10) + j", "def": "calc_val"}}
                     ],
-                    "def": "inner_loop_results_for_i" # Collects [ (i*10)+0, (i*10)+1 ]
+                    "def": "inner_loop_results_for_i"
                 }
             ],
-            "def": "outer_loop_total_results" # Collects [ [(0*10)+0, (0*10)+1], [(1*10)+0, (1*10)+1] ]
+            "def": "outer_loop_total_results"
         }
         program = create_loop_test_program(outer_loop_yaml_snippet)
         interpreter = Interpreter(pil_program=program, debug_mode=False)
-        interpreter.run()
+        await interpreter.run() # await
 
         expected_results = [
-            [0, 1], # i=0 -> j=0 (0), j=1 (1)
-            [10, 11] # i=1 -> j=0 (10), j=1 (11)
+            [0, 1],
+            [10, 11]
         ]
         self.assertEqual(interpreter.context.get_variable("outer_loop_total_results"), expected_results)
 
-        # Check that loop variables 'i' and 'j' are not in the final global context
         self.assertFalse(interpreter.context.has_variable("i"))
         self.assertFalse(interpreter.context.has_variable("j"))
-        self.assertFalse(interpreter.context.has_variable("calc_val")) # from inner loop step
-        self.assertFalse(interpreter.context.has_variable("inner_loop_results_for_i")) # from inner loop def
+        self.assertFalse(interpreter.context.has_variable("calc_val"))
+        self.assertFalse(interpreter.context.has_variable("inner_loop_results_for_i"))
 
 
 if __name__ == '__main__':

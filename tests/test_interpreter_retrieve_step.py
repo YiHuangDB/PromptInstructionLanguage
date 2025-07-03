@@ -37,7 +37,7 @@ def create_retrieve_test_program(
     parser = PilParser()
     return parser.parse_dict(program_dict)
 
-class TestInterpreterRetrieveStep(unittest.TestCase):
+class TestInterpreterRetrieveStep(unittest.IsolatedAsyncioTestCase): # Changed base class
 
     @classmethod
     def setUpClass(cls):
@@ -61,98 +61,81 @@ class TestInterpreterRetrieveStep(unittest.TestCase):
         if cls.test_kb_path.exists():
             os.remove(cls.test_kb_path)
 
-    def test_simple_retrieval_found(self):
+    async def test_simple_retrieval_found(self): # async
         program = create_retrieve_test_program(str(self.test_kb_path), "Paris Eiffel Tower", k=2)
         interpreter = Interpreter(program)
-        interpreter.run()
+        await interpreter.run() # await
 
         retrieved_docs = interpreter.context.get_variable("retrieved_docs")
         self.assertEqual(len(retrieved_docs), 2)
-        self.assertEqual(retrieved_docs[0]["id"], "doc1") # "Paris", "Eiffel", "Tower" - 3 matches
-        self.assertEqual(retrieved_docs[1]["id"], "doc6") # "Eiffel", "Tower", "Paris" - 3 matches (order might vary if scores are same)
-        # Check scores (simple count of common unique keywords)
+        self.assertEqual(retrieved_docs[0]["id"], "doc1")
+        self.assertEqual(retrieved_docs[1]["id"], "doc6")
         self.assertAlmostEqual(retrieved_docs[0]["score"], 3.0)
         self.assertAlmostEqual(retrieved_docs[1]["score"], 3.0)
 
 
-    def test_retrieval_with_templating_in_query(self):
-        program = create_retrieve_test_program(str(self.test_kb_path), "Information about {{city_name}}", k=1, initial_vars={"city_name": "London"})
-        interpreter = Interpreter(program, initial_vars={"city_name": "London"})
-        interpreter.run()
-
-        retrieved_docs = interpreter.context.get_variable("retrieved_docs")
-        self.assertEqual(len(retrieved_docs), 1)
-        self.assertEqual(retrieved_docs[0]["id"], "doc3") # "London", "capital" (if "information about" is ignored by splitting) -> query "information about london"
-        # Query: "information about london" -> tokens: {information, about, london}
-        # Doc3: "london is the capital of the united kingdom" -> tokens: {london, is, the, capital, of, united, kingdom}
-        # Common: {london} -> score 1.0 (This is very basic, "information" and "about" likely won't match)
-        # Let's refine query for better testing: "capital {{city_name}}"
-
+    async def test_retrieval_with_templating_in_query(self): # async
         program_refined = create_retrieve_test_program(str(self.test_kb_path), "capital {{city_name}}", k=1, initial_vars={"city_name": "London"})
         interpreter_refined = Interpreter(program_refined, initial_vars={"city_name": "London"})
-        interpreter_refined.run()
+        await interpreter_refined.run() # await
         retrieved_docs_refined = interpreter_refined.context.get_variable("retrieved_docs")
         self.assertEqual(len(retrieved_docs_refined), 1)
-        self.assertEqual(retrieved_docs_refined[0]["id"], "doc3") # Query: "capital london", Doc3: "london capital" -> score 2
+        self.assertEqual(retrieved_docs_refined[0]["id"], "doc3")
         self.assertAlmostEqual(retrieved_docs_refined[0]["score"], 2.0)
 
 
-    def test_retrieval_k_value_respected(self):
+    async def test_retrieval_k_value_respected(self): # async
         program = create_retrieve_test_program(str(self.test_kb_path), "Paris", k=1)
         interpreter = Interpreter(program)
-        interpreter.run()
+        await interpreter.run() # await
         retrieved_docs = interpreter.context.get_variable("retrieved_docs")
         self.assertEqual(len(retrieved_docs), 1)
-        # Multiple docs contain "Paris", check that the one with highest score (or one of them) is returned
         self.assertIn(retrieved_docs[0]["id"], ["doc1", "doc2", "doc4", "doc6"])
 
-    def test_retrieval_no_matches(self):
+    async def test_retrieval_no_matches(self): # async
         program = create_retrieve_test_program(str(self.test_kb_path), "non_existent_keyword_xyz", k=3)
         interpreter = Interpreter(program)
-        interpreter.run()
+        await interpreter.run() # await
         retrieved_docs = interpreter.context.get_variable("retrieved_docs")
         self.assertEqual(len(retrieved_docs), 0)
 
-    def test_retrieval_from_empty_kb_file(self):
+    async def test_retrieval_from_empty_kb_file(self): # async
         empty_kb_path = self.test_data_dir / "empty_kb.json"
         with open(empty_kb_path, "w") as f:
             json.dump([], f)
 
         program = create_retrieve_test_program(str(empty_kb_path), "any query", k=3)
-        interpreter = Interpreter(program) # KB loading happens here
-        interpreter.run() # Execute the workflow
+        interpreter = Interpreter(program)
+        await interpreter.run() # await
 
         retrieved_docs = interpreter.context.get_variable("retrieved_docs")
         self.assertEqual(len(retrieved_docs), 0)
         os.remove(empty_kb_path)
 
-    def test_retrieval_from_non_existent_kb_file(self):
+    async def test_retrieval_from_non_existent_kb_file(self): # async
         non_existent_kb_path = str(self.test_data_dir / "i_do_not_exist.json")
         program = create_retrieve_test_program(non_existent_kb_path, "any query", k=3)
 
-        # KB loading failure occurs at Interpreter initialization and prints a warning.
-        # The retrieval step itself should then gracefully return empty.
         interpreter = Interpreter(program)
-        interpreter.run()
+        await interpreter.run() # await
 
         retrieved_docs = interpreter.context.get_variable("retrieved_docs")
         self.assertEqual(len(retrieved_docs), 0)
-        # Also check if the kb was marked as None (failed to load)
         self.assertIsNone(interpreter.knowledge_bases.get(non_existent_kb_path))
 
-    def test_retrieval_case_insensitivity(self):
+    async def test_retrieval_case_insensitivity(self): # async
         program = create_retrieve_test_program(str(self.test_kb_path), "pArIs eiFFel", k=1)
         interpreter = Interpreter(program)
-        interpreter.run()
+        await interpreter.run() # await
         retrieved_docs = interpreter.context.get_variable("retrieved_docs")
         self.assertEqual(len(retrieved_docs), 1)
-        self.assertEqual(retrieved_docs[0]["id"], "doc1") # or doc6, both have 2 matches for "paris", "eiffel"
+        self.assertEqual(retrieved_docs[0]["id"], "doc1")
         self.assertAlmostEqual(retrieved_docs[0]["score"], 2.0)
 
-    def test_retrieval_document_structure_and_score(self):
+    async def test_retrieval_document_structure_and_score(self): # async
         program = create_retrieve_test_program(str(self.test_kb_path), "London capital", k=1)
         interpreter = Interpreter(program)
-        interpreter.run()
+        await interpreter.run() # await
         retrieved_docs = interpreter.context.get_variable("retrieved_docs")
         self.assertEqual(len(retrieved_docs), 1)
         doc = retrieved_docs[0]

@@ -1,3 +1,6 @@
+import asyncio
+import functools # For functools.partial
+import inspect # For iscoroutinefunction
 import yaml
 import asteval # For CodeStep execution sandbox
 from typing import Dict, Any, Optional, List, Callable
@@ -114,13 +117,14 @@ class Interpreter:
             self.llm_client = None
             raise ConfigurationError(error_msg)
         try:
-            self.llm_client = openai.OpenAI(api_key=api_key)
-            self._add_trace_log("LLM_CLIENT_INIT_SUCCESS", model=model_name, client_type="OpenAI")
-            print(f"Interpreter: OpenAI LLM Client Initialized for model '{model_name}'.")
+            # Changed to AsyncOpenAI
+            self.llm_client = openai.AsyncOpenAI(api_key=api_key)
+            self._add_trace_log("LLM_CLIENT_INIT_SUCCESS", model=model_name, client_type="AsyncOpenAI")
+            print(f"Interpreter: OpenAI Async LLM Client Initialized for model '{model_name}'.")
         except Exception as e:
             self.llm_client = None
             self._add_trace_log("LLM_CLIENT_INIT_ERROR", model=model_name, error=str(e))
-            raise ConfigurationError(f"Error initializing OpenAI client for model '{model_name}': {e}") from e
+            raise ConfigurationError(f"Error initializing AsyncOpenAI client for model '{model_name}': {e}") from e
 
     def _load_knowledge_base(self, file_path: str) -> List[Dict[str, Any]]:
         try:
@@ -189,34 +193,34 @@ class Interpreter:
                 raise ValueError(err_msg)
         self._add_trace_log("INPUT_VALIDATION", status="Inputs validated successfully.", inputs_in_context=list(provided_inputs.keys()))
 
-    def _execute_step(self, step_obj: BaseStep, step_index: int, total_steps: int) -> Any:
+    async def _execute_step(self, step_obj: BaseStep, step_index: int, total_steps: int) -> Any:
         step_type_name = step_obj.__class__.__name__
         self._add_trace_log("PRE_STEP_EXECUTION", step_number=f"{step_index+1}/{total_steps}", type=step_type_name, definition=str(step_obj),
                             current_context_keys=list(self.context.get_all_variables().keys()))
         print(f"  Executing {step_type_name}: {step_obj}")
         output = None
         if isinstance(step_obj, PromptStep):
-            output = self._execute_prompt_step(step_obj)
+            output = await self._execute_prompt_step(step_obj)
         elif isinstance(step_obj, RetrieveStep):
-            output = self._execute_retrieve_step(step_obj)
+            output = await self._execute_retrieve_step(step_obj)
         elif isinstance(step_obj, ToolStep):
-            output = self._execute_tool_step(step_obj)
+            output = await self._execute_tool_step(step_obj)
         elif isinstance(step_obj, CodeStep):
-            output = self._execute_code_step(step_obj)
+            output = await self._execute_code_step(step_obj)
         elif isinstance(step_obj, IfStep):
-            self._execute_if_step(step_obj)
+            await self._execute_if_step(step_obj) # IfStep doesn't typically return a direct output to be stored
         elif isinstance(step_obj, LoopStep):
-            output = self._execute_loop_step(step_obj)
+            output = await self._execute_loop_step(step_obj)
         else:
             raise TypeError(f"Unknown step type: {step_type_name}")
         self._add_trace_log("POST_STEP_EXECUTION", step_number=f"{step_index+1}/{total_steps}", type=step_type_name, raw_output=str(output))
-        if step_obj.def_var:
+        if step_obj.def_var: # This check remains valid for all steps that might define a variable
             self.context.set_variable(step_obj.def_var, output)
             self._add_trace_log("CONTEXT_SET", variable=step_obj.def_var, value=str(output))
             print(f"    - Defined variable: {step_obj.def_var} = {output}")
         return output
 
-    def _execute_prompt_step(self, step: PromptStep) -> str:
+    async def _execute_prompt_step(self, step: PromptStep) -> str:
         template_text = step.text
         context_vars = self.context.get_all_variables()
         rendered_text = render_template_string(template_text, context_vars)
@@ -270,7 +274,8 @@ class Interpreter:
                 print(f"    - Attempt {attempt+1}/{step.max_retries+1}: Making API call to OpenAI model: {self.pil_program.config.model}")
                 if attempt > 0: print(f"    - Corrective user message being used.")
 
-                completion = self.llm_client.chat.completions.create(
+                # Changed to await and async client call
+                completion = await self.llm_client.chat.completions.create(
                     model=self.pil_program.config.model,
                     messages=messages,
                     **self.pil_program.config.parameters
@@ -280,7 +285,7 @@ class Interpreter:
                 self._add_trace_log("LLM_API_CALL_SUCCESS", attempt=attempt+1, response_id=completion.id, finish_reason=completion.choices[0].finish_reason, usage=str(completion.usage))
                 print(f"    - LLM Response received (Attempt {attempt+1}). Finish reason: {completion.choices[0].finish_reason}")
 
-            except openai.APIConnectionError as e_api:
+            except openai.APIConnectionError as e_api: # openai._exceptions.APIConnectionError
                 err_msg = f"OpenAI API request failed to connect (Attempt {attempt+1}): {e_api}"
                 self._add_trace_log("LLM_API_CALL_ERROR", attempt=attempt+1, error_type="APIConnectionError", error_message=str(e_api))
                 last_error = ConnectionError(err_msg)
@@ -340,9 +345,18 @@ class Interpreter:
 
         raise RuntimeError(f"PromptStep execution unexpectedly completed all retries ({step.max_retries + 1} attempts) without returning or raising a specific error.")
 
-    def _execute_retrieve_step(self, step: RetrieveStep) -> List[Dict[str, Any]]:
+    async def _execute_retrieve_step(self, step: RetrieveStep) -> List[Dict[str, Any]]:
+        # For now, keep file I/O synchronous but wrapped if it were truly async
+        # In a real async implementation with external DBs, this would use an async library
+        # For local files, true async might be overkill or require aiofiles.
+        # Using asyncio.to_thread for demonstration if this were a blocking call.
+        # However, the actual loading is in __init__. This part is just querying the loaded dict.
+        # So, this specific retrieve logic might not need `to_thread` unless tokenization is very heavy.
+        # For now, let's assume tokenization and dict lookups are fast enough not to need `to_thread`.
+        # If KBs were loaded on-demand here, then `to_thread` for file I/O would be essential.
+
         context_vars = self.context.get_all_variables()
-        rendered_query = render_template_string(step.query, context_vars)
+        rendered_query = render_template_string(step.query, context_vars) # This is CPU-bound, quick
         self._add_trace_log("TEMPLATE_RENDERED", step_type="RetrieveStep", original_query=step.query, rendered_query=rendered_query)
         print(f"    - Retrieval: from='{step.from_source}', query='{rendered_query}', k={step.k}")
 
@@ -381,7 +395,7 @@ class Interpreter:
         self._add_trace_log("RETRIEVAL_EXECUTED", source=step.from_source, query=rendered_query, k=step.k, result_count=len(results), total_matches_before_k=len(scored_documents))
         return results
 
-    def _execute_tool_step(self, step: ToolStep) -> Any:
+    async def _execute_tool_step(self, step: ToolStep) -> Any:
         context_vars = self.context.get_all_variables()
         rendered_args = {}
         for arg_name, val_template in step.args.items():
@@ -400,12 +414,22 @@ class Interpreter:
         tool_callable = self.tool_registry[step.name]
         try:
             self._add_trace_log("TOOL_EXECUTION_START", tool_name=step.name, args_passed=rendered_args)
-            tool_output = tool_callable(**rendered_args)
+            if inspect.iscoroutinefunction(tool_callable):
+                tool_output = await tool_callable(**rendered_args)
+            else:
+                # Run synchronous tool in a thread pool to avoid blocking the event loop
+                loop = asyncio.get_event_loop()
+                # Use functools.partial to pass keyword arguments to the executor
+                partial_func = functools.partial(tool_callable, **rendered_args)
+                tool_output = await loop.run_in_executor(None, partial_func)
+
             self._add_trace_log("TOOL_EXECUTION_SUCCESS", tool_name=step.name, output=str(tool_output))
             print(f"    - Tool '{step.name}' executed successfully.")
             return tool_output
         except TypeError as e:
-            error_msg = f"Type error while calling tool '{step.name}' with args {rendered_args}: {e}"
+            # This TypeError could be from the tool's signature validation before actual execution
+            # or from within the tool if it's synchronous and misuses types.
+            error_msg = f"Type error while calling or executing tool '{step.name}' with args {rendered_args}: {e}"
             self._add_trace_log("TOOL_EXECUTION_ERROR", tool_name=step.name, error_type="TypeError", error_message=str(e))
             raise ToolExecutionError(error_msg, tool_name=step.name, original_exception=e) from e
         except Exception as e:
@@ -413,17 +437,33 @@ class Interpreter:
             self._add_trace_log("TOOL_EXECUTION_ERROR", tool_name=step.name, error_type=type(e).__name__, error_message=str(e))
             raise ToolExecutionError(error_msg, tool_name=step.name, original_exception=e) from e
 
-    def _execute_code_step(self, step: CodeStep) -> Any:
+    async def _execute_code_step(self, step: CodeStep) -> Any:
         if step.lang.lower() != 'python':
             raise NotImplementedError(f"Code execution for language '{step.lang}' is not supported. Only Python is allowed.")
+
         context_vars = self.context.get_all_variables()
         rendered_script = render_template_string(step.script, context_vars)
         self._add_trace_log("TEMPLATE_RENDERED", step_type="CodeStep", original_script=step.script, rendered_script=rendered_script)
         print(f"    - Executing Python Code (in asteval sandbox):\n{rendered_script}")
+
+        # asteval is synchronous, so we'd run it in a thread pool if it could be long.
+        # For now, assuming it's relatively quick or this part will be refined.
+        # Placeholder for potential asyncio.to_thread wrapping.
         local_sandbox_context = context_vars.copy()
         aeval = asteval.Interpreter(symtable=local_sandbox_context, minimal=False)
-        aeval.eval(rendered_script)
-        if aeval.error:
+
+        # Run synchronous asteval.eval in a thread pool
+        loop = asyncio.get_event_loop()
+        try:
+            # asteval.eval doesn't return a value directly, it modifies symtable
+            # We need to run the eval part in the executor.
+            # The result is then fetched from aeval.symtable.
+            await loop.run_in_executor(None, aeval.eval, rendered_script)
+        except Exception as e_exec: # Catch potential errors from within the executor/asteval
+            self._add_trace_log("CODE_EXECUTION_ERROR", script=rendered_script, error=str(e_exec))
+            raise ValueError(f"Error during asteval execution: {e_exec}\nScript:\n{rendered_script}") from e_exec
+
+        if aeval.error: # Check for errors collected by asteval
             error_msg = "\n".join([err.get_error()[1] for err in aeval.error])
             self._add_trace_log("CODE_EXECUTION_ERROR", script=rendered_script, error=error_msg)
             raise ValueError(f"Error executing Python code step: {error_msg}\nScript:\n{rendered_script}")
@@ -433,31 +473,32 @@ class Interpreter:
             print("    - CodeStep Warning: No 'result' variable found in script output. Returning None.")
         return result_val
 
-    def _execute_if_step(self, step: IfStep):
+    async def _execute_if_step(self, step: IfStep):
         context_vars = self.context.get_all_variables()
+        # Assuming safe_eval_code_string is quick (CPU bound)
         condition_result = safe_eval_code_string(step.condition, context_vars)
         self._add_trace_log("IF_CONDITION_EVAL", condition_str=step.condition, outcome=condition_result, context_used_keys=list(context_vars.keys()))
         print(f"    - If Condition: '{step.condition}' evaluated to: {condition_result}")
         if condition_result:
             print(f"    - Executing 'then' branch...")
-            self._execute_workflow_steps(step.then_steps, branch_name="if_then")
+            await self._execute_workflow_steps(step.then_steps, branch_name="if_then")
         elif step.else_steps:
             print(f"    - Executing 'else' branch...")
-            self._execute_workflow_steps(step.else_steps, branch_name="if_else")
+            await self._execute_workflow_steps(step.else_steps, branch_name="if_else")
         else:
             print(f"    - Condition is false, no 'else' branch to execute.")
 
-    def _execute_workflow_steps(self, steps: List[StepType], branch_name: str = "main_workflow") -> Any:
+    async def _execute_workflow_steps(self, steps: List[StepType], branch_name: str = "main_workflow") -> Any:
         self._add_trace_log("WORKFLOW_BRANCH_START", branch=branch_name, num_steps=len(steps))
         last_output = None
         for i, step_obj in enumerate(steps):
             if not isinstance(step_obj, BaseStep):
                 raise TypeError(f"Step {i} in branch '{branch_name}' is not a valid BaseStep instance: {step_obj}")
-            last_output = self._execute_step(step_obj, i, len(steps))
+            last_output = await self._execute_step(step_obj, i, len(steps))
         self._add_trace_log("WORKFLOW_BRANCH_END", branch=branch_name, last_output=str(last_output))
         return last_output
 
-    def _execute_loop_step(self, step: LoopStep) -> Optional[List[Any]]:
+    async def _execute_loop_step(self, step: LoopStep) -> Optional[List[Any]]:
         self._add_trace_log("LOOP_STEP_START", loop_type=str(step.loop_type), expression=step.expression)
         iteration_results = []
         original_context = self.context
@@ -469,19 +510,22 @@ class Interpreter:
                 raise ValueError(f"Iterable '{step.iterable_var_name}' not found in context for FOR_EACH loop.")
             if not hasattr(iterable_collection, '__iter__') or isinstance(iterable_collection, str):
                 raise TypeError(f"Variable '{step.iterable_var_name}' is not an iterable collection for FOR_EACH loop.")
+
             for item_index, item_value in enumerate(iterable_collection):
                 iteration_context = Context(initial_vars=original_context.get_all_variables())
                 iteration_context.set_variable(step.loop_var_name, item_value)
                 self.context = iteration_context
                 self._add_trace_log("LOOP_ITERATION_START", loop_type="FOR_EACH", iteration=item_index, loop_var=step.loop_var_name, value=item_value)
-                last_iteration_output = self._execute_workflow_steps(step.steps, branch_name=f"loop_for_each_iter_{item_index}")
+                last_iteration_output = await self._execute_workflow_steps(step.steps, branch_name=f"loop_for_each_iter_{item_index}")
                 iteration_results.append(last_iteration_output)
                 self._add_trace_log("LOOP_ITERATION_END", loop_type="FOR_EACH", iteration=item_index, output=last_iteration_output)
             self.context = original_context
+
         elif step.loop_type == LoopType.FOR_RANGE:
             if not step.loop_var_name or not step.range_args_str:
                 raise ValueError("LoopStep FOR_RANGE is missing loop_var_name or range_args_str.")
             eval_args = []
+            # Assuming safe_eval_code_string is quick (CPU bound)
             for arg_str in step.range_args_str:
                 val = safe_eval_code_string(arg_str, original_context.get_all_variables())
                 if not isinstance(val, int):
@@ -489,20 +533,23 @@ class Interpreter:
                 eval_args.append(val)
             if not 1 <= len(eval_args) <= 3:
                 raise ValueError(f"Invalid number of arguments for range: {len(eval_args)}. Expected 1, 2, or 3.")
+
             for i_val in range(*eval_args):
                 iteration_context = Context(initial_vars=original_context.get_all_variables())
                 iteration_context.set_variable(step.loop_var_name, i_val)
                 self.context = iteration_context
                 self._add_trace_log("LOOP_ITERATION_START", loop_type="FOR_RANGE", iteration_value=i_val, loop_var=step.loop_var_name)
-                last_iteration_output = self._execute_workflow_steps(step.steps, branch_name=f"loop_for_range_iter_{i_val}")
+                last_iteration_output = await self._execute_workflow_steps(step.steps, branch_name=f"loop_for_range_iter_{i_val}")
                 iteration_results.append(last_iteration_output)
                 self._add_trace_log("LOOP_ITERATION_END", loop_type="FOR_RANGE", iteration_value=i_val, output=last_iteration_output)
             self.context = original_context
+
         elif step.loop_type == LoopType.WHILE:
             if not step.condition_expr:
                 raise ValueError("LoopStep WHILE is missing condition_expr.")
             iteration_count = 0
             while True:
+                # Assuming safe_eval_code_string is quick (CPU bound)
                 condition_result = safe_eval_code_string(step.condition_expr, self.context.get_all_variables())
                 if not isinstance(condition_result, bool):
                     raise TypeError(f"While loop condition '{step.condition_expr}' must evaluate to a boolean. Got: {condition_result}")
@@ -510,7 +557,7 @@ class Interpreter:
                 if not condition_result:
                     break
                 self._add_trace_log("LOOP_ITERATION_START", loop_type="WHILE", iteration=iteration_count)
-                last_iteration_output = self._execute_workflow_steps(step.steps, branch_name=f"loop_while_iter_{iteration_count}")
+                last_iteration_output = await self._execute_workflow_steps(step.steps, branch_name=f"loop_while_iter_{iteration_count}")
                 iteration_results.append(last_iteration_output)
                 self._add_trace_log("LOOP_ITERATION_END", loop_type="WHILE", iteration=iteration_count, output=last_iteration_output)
                 iteration_count += 1
@@ -526,7 +573,7 @@ class Interpreter:
             return iteration_results
         return None
 
-    def run(self, inputs: Optional[Dict[str, Any]] = None) -> Any:
+    async def run(self, inputs: Optional[Dict[str, Any]] = None) -> Any:
         self._add_trace_log("INTERPRETER_RUN_START", pil_program_config_model=self.pil_program.config.model if self.pil_program.config else "N/A")
         print(f"Interpreter: Running PIL program...")
         if inputs:
@@ -548,7 +595,7 @@ class Interpreter:
             self._add_trace_log("WORKFLOW_EMPTY", status="Workflow has no steps.")
             print("Interpreter: Workflow has no steps to execute.")
             return None
-        final_output = self._execute_workflow_steps(self.pil_program.workflow.steps)
+        final_output = await self._execute_workflow_steps(self.pil_program.workflow.steps) # Added await
         self._add_trace_log("INTERPRETER_RUN_END", final_output_from_workflow=str(final_output))
         if self.pil_program.output_schema and self.pil_program.output_schema.schema:
             self._add_trace_log("OUTPUT_SCHEMA_VALIDATION_START", schema=self.pil_program.output_schema.schema, output_to_validate=str(final_output))
@@ -591,8 +638,21 @@ class Interpreter:
             print("--- END DEBUG TRACE LOG ---")
         return final_output
 
+    def run_sync(self, inputs: Optional[Dict[str, Any]] = None) -> Any:
+        """
+        Synchronous wrapper for the `run` coroutine.
+        This method allows calling the interpreter from synchronous code.
+        It will block until the PIL program execution is complete.
+        """
+        return asyncio.run(self.run(inputs=inputs))
+
 if __name__ == '__main__':
     print("PIL Interpreter with Step Execution Logic and Debug Tracing Concepts")
+    # Note: The __main__ block will need to be updated to use asyncio.run
+    # or call run_sync for the example to work with the async interpreter.
+    # For simplicity in this step, I'm not changing the __main__ example execution yet.
+    # That would be part of testing or a separate refactor of the example.
+
     test_pil_yaml_content = """
 config:
   model: test-model-002

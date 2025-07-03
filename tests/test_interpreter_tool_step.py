@@ -58,27 +58,25 @@ def create_tool_test_program(
     return parser.parse_dict(program_dict)
 
 
-class TestInterpreterToolStep(unittest.TestCase):
+class TestInterpreterToolStep(unittest.IsolatedAsyncioTestCase): # Changed base class
 
     def setUp(self):
-        self.interpreter = Interpreter(PilParser().parse_dict({"workflow": {"steps": []}})) # Basic interpreter
-        # Register sample tools
+        self.interpreter = Interpreter(PilParser().parse_dict({"workflow": {"steps": []}}))
         self.interpreter.register_tool("add_numbers", add_tool)
         self.interpreter.register_tool("greet_user", greet_tool)
         self.interpreter.register_tool("failing_tool", tool_that_raises_exception)
 
-    def test_simple_tool_call_add(self):
+    async def test_simple_tool_call_add(self): # async
         program = create_tool_test_program("add_numbers", {"a": 5, "b": "3.0"})
-        # Re-initialize interpreter with this specific program for context, or set program
         self.interpreter.pil_program = program
-        self.interpreter.context = Context() # Reset context for this run
+        self.interpreter.context = Context()
 
-        self.interpreter.run()
+        await self.interpreter.run() # await
 
         output = self.interpreter.context.get_variable("tool_output")
         self.assertEqual(output, 8.0)
 
-    def test_tool_call_with_templating(self):
+    async def test_tool_call_with_templating(self): # async
         program = create_tool_test_program(
             "greet_user",
             {"name": "{{user_name}}", "greeting": "Hi"},
@@ -87,55 +85,52 @@ class TestInterpreterToolStep(unittest.TestCase):
         self.interpreter.pil_program = program
         self.interpreter.context = Context(initial_vars={"user_name": "Alice"})
 
-        self.interpreter.run()
+        await self.interpreter.run() # await
         output = self.interpreter.context.get_variable("tool_output")
         self.assertEqual(output, "Hi, Alice!")
 
-    def test_tool_with_default_argument(self):
-        program = create_tool_test_program("greet_user", {"name": "Bob"}) # Uses default greeting
+    async def test_tool_with_default_argument(self): # async
+        program = create_tool_test_program("greet_user", {"name": "Bob"})
         self.interpreter.pil_program = program
         self.interpreter.context = Context()
 
-        self.interpreter.run()
+        await self.interpreter.run() # await
         output = self.interpreter.context.get_variable("tool_output")
         self.assertEqual(output, "Hello, Bob!")
 
-    def test_unregistered_tool_call(self):
+    async def test_unregistered_tool_call(self): # async
         program = create_tool_test_program("non_existent_tool", {"arg": "val"})
         self.interpreter.pil_program = program
         self.interpreter.context = Context()
 
         with self.assertRaisesRegex(ToolNotFoundException, "Tool 'non_existent_tool' not found in registry"):
-            self.interpreter.run()
+            await self.interpreter.run() # await
 
-    def test_tool_raises_type_error_for_bad_args(self):
-        # add_tool expects args convertible to float
+    async def test_tool_raises_type_error_for_bad_args(self): # async
         program = create_tool_test_program("add_numbers", {"a": "five", "b": 3})
         self.interpreter.pil_program = program
         self.interpreter.context = Context()
 
-        # The interpreter's _execute_tool_step catches and wraps exceptions in ToolExecutionError
-        with self.assertRaisesRegex(ToolExecutionError, "Type error while calling tool 'add_numbers' with args {'a': 'five', 'b': 3}: Both 'a' and 'b' must be convertible to numbers for add_tool."):
-            self.interpreter.run()
+        with self.assertRaisesRegex(ToolExecutionError, "Type error while calling or executing tool 'add_numbers' with args {'a': 'five', 'b': 3}: Both 'a' and 'b' must be convertible to numbers for add_tool."):
+            await self.interpreter.run() # await
 
-    def test_tool_raises_custom_exception(self):
+    async def test_tool_raises_custom_exception(self): # async
         program = create_tool_test_program("failing_tool", {})
         self.interpreter.pil_program = program
         self.interpreter.context = Context()
 
-        # The interpreter's _execute_tool_step wraps other exceptions in ToolExecutionError
         with self.assertRaisesRegex(ToolExecutionError, "Tool 'failing_tool' raised an exception: This tool intentionally failed."):
-            self.interpreter.run()
+            await self.interpreter.run() # await
 
-    def test_tool_output_is_correctly_defined(self):
+    async def test_tool_output_is_correctly_defined(self): # async
         program = create_tool_test_program("add_numbers", {"a": 10, "b": 20}, def_var="sum_result")
         self.interpreter.pil_program = program
         self.interpreter.context = Context()
-        self.interpreter.run()
+        await self.interpreter.run() # await
         self.assertTrue(self.interpreter.context.has_variable("sum_result"))
         self.assertEqual(self.interpreter.context.get_variable("sum_result"), 30.0)
 
-def complex_arg_tool(name: str, numbers: List[int], config: Dict[str, Any], active: Any): # Changed active hint to Any
+def complex_arg_tool(name: str, numbers: List[int], config: Dict[str, Any], active: Any):
     """A tool that accepts complex (list, dict, bool) arguments, robust to string booleans."""
     is_active_bool = False
     if isinstance(active, bool):
@@ -188,12 +183,12 @@ class TestInterpreterToolRegistration(unittest.TestCase):
         self.assertIn("Warning: Tool 're_tool' is being re-registered", captured_output.getvalue())
         self.assertEqual(self.interpreter.tool_registry["re_tool"](), "new", "Tool should be updated to the new callable.")
 
-class TestInterpreterToolStepWithComplexArgs(unittest.TestCase):
+class TestInterpreterToolStepWithComplexArgs(unittest.IsolatedAsyncioTestCase): # Changed base class
     def setUp(self):
         self.interpreter = Interpreter(PilParser().parse_dict({"workflow": {"steps": []}}))
         self.interpreter.register_tool("complex_tool", complex_arg_tool)
 
-    def test_tool_with_literal_dict_list_bool_args(self):
+    async def test_tool_with_literal_dict_list_bool_args(self): # async
         test_config = {"key1": "val1", "nested": {"n_key": 100}}
         test_numbers = [10, 20, 30]
 
@@ -201,37 +196,36 @@ class TestInterpreterToolStepWithComplexArgs(unittest.TestCase):
             "complex_tool",
             {
                 "name": "MyComplexTask",
-                "numbers": test_numbers, # Passed as actual list
-                "config": test_config,   # Passed as actual dict
-                "active": True           # Passed as actual bool
+                "numbers": test_numbers,
+                "config": test_config,
+                "active": True
             },
             def_var="complex_output"
         )
         self.interpreter.pil_program = program
         self.interpreter.context = Context()
-        self.interpreter.run()
+        await self.interpreter.run() # await
 
         expected_output = "MyComplexTask: Processed 3 numbers. First config key: key1"
         self.assertEqual(self.interpreter.context.get_variable("complex_output"), expected_output)
 
-    def test_tool_with_literal_args_and_templating(self):
-        # Scenario: some args are literal, some are templated
+    async def test_tool_with_literal_args_and_templating(self): # async
         test_config_literal = {"source": "direct"}
 
         program = create_tool_test_program(
             "complex_tool",
             {
-                "name": "{{task_name}}", # Templated
-                "numbers": [1, 2],       # Literal list
-                "config": test_config_literal, # Literal dict
-                "active": "{{is_active}}" # Templated
+                "name": "{{task_name}}",
+                "numbers": [1, 2],
+                "config": test_config_literal,
+                "active": "{{is_active}}"
             },
             initial_vars={"task_name": "MixedTask", "is_active": False},
             def_var="mixed_output"
         )
         self.interpreter.pil_program = program
         self.interpreter.context = Context(initial_vars={"task_name": "MixedTask", "is_active": False})
-        self.interpreter.run()
+        await self.interpreter.run() # await
 
         expected_output = "MixedTask is inactive."
         self.assertEqual(self.interpreter.context.get_variable("mixed_output"), expected_output)

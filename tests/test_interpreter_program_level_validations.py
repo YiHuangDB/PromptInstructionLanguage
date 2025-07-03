@@ -44,25 +44,25 @@ def create_program_level_validation_test_program(
     return parser.parse_dict(program_dict)
 
 
-class TestInterpreterProgramLevelValidations(unittest.TestCase):
+class TestInterpreterProgramLevelValidations(unittest.IsolatedAsyncioTestCase): # Changed base class
 
     # --- OutputSchema Tests ---
-    def test_schema_valid_string_output(self):
+    async def test_schema_valid_string_output(self): # async
         schema = {"type": "string"}
         steps = [{"code": {"lang": "python", "script": "result = 'hello world'", "def": "final_res"}}]
         program = create_program_level_validation_test_program(output_schema_dict=schema, workflow_steps=steps)
         interpreter = Interpreter(program)
-        interpreter.run()
+        await interpreter.run() # await
 
-    def test_schema_invalid_string_output_wrong_type(self):
+    async def test_schema_invalid_string_output_wrong_type(self): # async
         schema = {"type": "string"}
         steps = [{"code": {"lang": "python", "script": "result = 123", "def": "final_res"}}]
         program = create_program_level_validation_test_program(output_schema_dict=schema, workflow_steps=steps)
         interpreter = Interpreter(program)
         with self.assertRaisesRegex(OutputValidationError, "123 is not of type 'string'"):
-            interpreter.run()
+            await interpreter.run() # await
 
-    def test_schema_valid_object_output(self):
+    async def test_schema_valid_object_output(self): # async
         schema = {
             "type": "object",
             "properties": {
@@ -73,12 +73,11 @@ class TestInterpreterProgramLevelValidations(unittest.TestCase):
         }
         script = "result = {'name': 'Alice', 'age': 30}"
         steps = [{"code": {"lang": "python", "script": script, "def": "final_res"}}]
-        # Corrected helper function name
         program = create_program_level_validation_test_program(output_schema_dict=schema, workflow_steps=steps)
         interpreter = Interpreter(program)
-        interpreter.run()
+        await interpreter.run() # await
 
-    def test_invalid_object_output_missing_required(self):
+    async def test_invalid_object_output_missing_required(self): # async
         schema = {
             "type": "object",
             "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
@@ -86,14 +85,13 @@ class TestInterpreterProgramLevelValidations(unittest.TestCase):
         }
         script = "result = {'name': 'Bob'}"
         steps = [{"code": {"lang": "python", "script": script, "def": "final_res"}}]
-        # Corrected helper function name
         program = create_program_level_validation_test_program(output_schema_dict=schema, workflow_steps=steps)
         interpreter = Interpreter(program)
 
         with self.assertRaisesRegex(OutputValidationError, "'age' is a required property"):
-            interpreter.run()
+            await interpreter.run() # await
 
-    def test_invalid_object_output_wrong_property_type(self):
+    async def test_invalid_object_output_wrong_property_type(self): # async
         schema = {
             "type": "object",
             "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
@@ -101,106 +99,98 @@ class TestInterpreterProgramLevelValidations(unittest.TestCase):
         }
         script = "result = {'name': 'Charlie', 'age': 'thirty'}"
         steps = [{"code": {"lang": "python", "script": script, "def": "final_res"}}]
-        # Corrected helper function name
         program = create_program_level_validation_test_program(output_schema_dict=schema, workflow_steps=steps)
         interpreter = Interpreter(program)
 
         with self.assertRaisesRegex(OutputValidationError, "'thirty' is not of type 'integer'"):
-            interpreter.run()
+            await interpreter.run() # await
 
-    def test_output_none_schema_allows_null(self):
+    async def test_output_none_schema_allows_null(self): # async
         schema = {"type": ["string", "null"]}
         steps = [{"code": {"lang": "python", "script": "result = None", "def": "final_res"}}]
-        # Corrected helper function name
         program = create_program_level_validation_test_program(output_schema_dict=schema, workflow_steps=steps)
         interpreter = Interpreter(program)
-        interpreter.run()
+        await interpreter.run() # await
 
-    def test_output_none_schema_does_not_allow_null(self):
+    async def test_output_none_schema_does_not_allow_null(self): # async
         schema = {"type": "string"}
         steps = [{"code": {"lang": "python", "script": "result = None", "def": "final_res"}}]
-        # Corrected helper function name
         program = create_program_level_validation_test_program(output_schema_dict=schema, workflow_steps=steps)
         interpreter = Interpreter(program)
 
         with self.assertRaisesRegex(OutputValidationError, "None is not of type 'string'"):
-            interpreter.run()
+            await interpreter.run() # await
 
-    def test_no_output_schema_defined(self):
+    async def test_no_output_schema_defined(self): # async
         steps = [{"code": {"lang": "python", "script": "result = 123", "def": "final_res"}}]
-        # Corrected helper function name
         program = create_program_level_validation_test_program(output_schema_dict=None, workflow_steps=steps)
         interpreter = Interpreter(program)
         try:
-            interpreter.run()
+            await interpreter.run() # await
         except OutputValidationError:
             self.fail("OutputValidationError raised unexpectedly when no schema was defined.")
 
-    def test_malformed_schema_itself(self):
+    async def test_malformed_schema_itself(self): # async
         malformed_schema = {"type": "invalid_json_type"}
         steps = [{"code": {"lang": "python", "script": "result = 'some output'", "def": "final_res"}}]
-        # Corrected helper function name
         program = create_program_level_validation_test_program(output_schema_dict=malformed_schema, workflow_steps=steps)
         interpreter = Interpreter(program)
 
         with self.assertRaises(InvalidSchemaError) as cm:
-            interpreter.run()
+            await interpreter.run() # await
         self.assertIn("Invalid OutputSchema provided", str(cm.exception))
         self.assertIsNotNone(cm.exception.schema_error)
         self.assertIsInstance(cm.exception.schema_error, jsonschema.SchemaError)
 
     # --- Top-level PilProgram.constraints Tests ---
-    def test_program_constraints_valid_type(self):
+    async def test_program_constraints_valid_type(self): # async
         constraints = {"type": "string"}
         steps = [{"code": {"lang": "python", "script": "result = 'hello'", "def": "final_res"}}]
         program = create_program_level_validation_test_program(program_constraints_dict=constraints, workflow_steps=steps)
         interpreter = Interpreter(program)
-        final_val = interpreter.run()
+        final_val = await interpreter.run() # await
         self.assertEqual(final_val, "hello")
 
-    def test_program_constraints_invalid_type(self):
+    async def test_program_constraints_invalid_type(self): # async
         constraints = {"type": "integer"}
         steps = [{"code": {"lang": "python", "script": "result = 'not an integer'", "def": "final_res"}}]
         program = create_program_level_validation_test_program(program_constraints_dict=constraints, workflow_steps=steps)
         interpreter = Interpreter(program)
-        # Imported ConstraintViolationError
         with self.assertRaisesRegex(ConstraintViolationError, "Type constraint violated.*Cannot convert value to 'integer'"):
-            interpreter.run()
+            await interpreter.run() # await
 
-    def test_program_constraints_regex_pass(self):
+    async def test_program_constraints_regex_pass(self): # async
         constraints = {"regex": r"^[a-z]+$"}
         steps = [{"code": {"lang": "python", "script": "result = 'abc'", "def": "final_res"}}]
         program = create_program_level_validation_test_program(program_constraints_dict=constraints, workflow_steps=steps)
         interpreter = Interpreter(program)
-        self.assertEqual(interpreter.run(), "abc")
+        self.assertEqual(await interpreter.run(), "abc") # await
 
-    def test_program_constraints_regex_fail(self):
+    async def test_program_constraints_regex_fail(self): # async
         constraints = {"regex": r"^\d+$"}
         steps = [{"code": {"lang": "python", "script": "result = 'abc'", "def": "final_res"}}]
         program = create_program_level_validation_test_program(program_constraints_dict=constraints, workflow_steps=steps)
         interpreter = Interpreter(program)
-        # Imported ConstraintViolationError
         with self.assertRaisesRegex(ConstraintViolationError, "Regex constraint violated"):
-            interpreter.run()
+            await interpreter.run() # await
 
-    def test_program_constraints_choices_pass(self):
+    async def test_program_constraints_choices_pass(self): # async
         constraints = {"choices": ["apple", "banana", "cherry"]}
         steps = [{"code": {"lang": "python", "script": "result = 'banana'", "def": "final_res"}}]
         program = create_program_level_validation_test_program(program_constraints_dict=constraints, workflow_steps=steps)
         interpreter = Interpreter(program)
-        self.assertEqual(interpreter.run(), "banana")
+        self.assertEqual(await interpreter.run(), "banana") # await
 
-    def test_program_constraints_choices_fail(self):
+    async def test_program_constraints_choices_fail(self): # async
         constraints = {"choices": ["apple", "banana", "cherry"]}
         steps = [{"code": {"lang": "python", "script": "result = 'grape'", "def": "final_res"}}]
         program = create_program_level_validation_test_program(program_constraints_dict=constraints, workflow_steps=steps)
         interpreter = Interpreter(program)
-        # Imported ConstraintViolationError
         with self.assertRaisesRegex(ConstraintViolationError, "not one of the allowed choices"):
-            interpreter.run()
+            await interpreter.run() # await
 
     # --- Interaction: OutputSchema AND Program.constraints ---
-    def test_both_schema_and_program_constraints_pass(self):
+    async def test_both_schema_and_program_constraints_pass(self): # async
         output_schema = {"type": "string", "minLength": 3}
         program_constraints = {"regex": r"^[a-z]+$"}
         steps = [{"code": {"lang": "python", "script": "result = 'hello'", "def": "final_res"}}]
@@ -210,9 +200,9 @@ class TestInterpreterProgramLevelValidations(unittest.TestCase):
             workflow_steps=steps
         )
         interpreter = Interpreter(program)
-        self.assertEqual(interpreter.run(), "hello")
+        self.assertEqual(await interpreter.run(), "hello") # await
 
-    def test_schema_pass_program_constraints_fail(self):
+    async def test_schema_pass_program_constraints_fail(self): # async
         output_schema = {"type": "string"}
         program_constraints = {"regex": r"^[a-z]+$"}
         steps = [{"code": {"lang": "python", "script": "result = '123'", "def": "final_res"}}]
@@ -222,11 +212,10 @@ class TestInterpreterProgramLevelValidations(unittest.TestCase):
             workflow_steps=steps
         )
         interpreter = Interpreter(program)
-        # Imported ConstraintViolationError
         with self.assertRaisesRegex(ConstraintViolationError, "Regex constraint violated"):
-            interpreter.run()
+            await interpreter.run() # await
 
-    def test_schema_fail_program_constraints_not_reached(self):
+    async def test_schema_fail_program_constraints_not_reached(self): # async
         output_schema = {"type": "integer"}
         program_constraints = {"regex": r"^[a-z]+$"}
         steps = [{"code": {"lang": "python", "script": "result = 'abc'", "def": "final_res"}}]
@@ -237,9 +226,9 @@ class TestInterpreterProgramLevelValidations(unittest.TestCase):
         )
         interpreter = Interpreter(program)
         with self.assertRaisesRegex(OutputValidationError, "'abc' is not of type 'integer'"):
-            interpreter.run()
+            await interpreter.run() # await
 
-    def test_interaction_schema_pass_program_constraint_type_conversion(self):
+    async def test_interaction_schema_pass_program_constraint_type_conversion(self): # async
         json_list_string = "[1, 2, 3]"
         steps = [{"code": {"lang": "python", "script": f"result = '{json_list_string}'", "def": "final_res"}}]
 
@@ -252,10 +241,8 @@ class TestInterpreterProgramLevelValidations(unittest.TestCase):
             workflow_steps=steps
         )
         interpreter = Interpreter(program)
-        final_output = interpreter.run()
+        final_output = await interpreter.run() # await
 
-        # The string '[1, 2, 3]' passes string schema.
-        # Then apply_constraints converts it to actual list [1, 2, 3]
         self.assertEqual(final_output, [1, 2, 3])
         self.assertIsInstance(final_output, list)
 

@@ -52,7 +52,7 @@ def create_prompt_test_program(
     return parser.parse_dict(program_dict)
 
 
-class TestInterpreterPromptStep(unittest.TestCase):
+class TestInterpreterPromptStep(unittest.IsolatedAsyncioTestCase): # Changed base class
 
     def setUp(self):
         # Ensure a clean environment for API key tests if needed, though mocks are preferred
@@ -66,30 +66,32 @@ class TestInterpreterPromptStep(unittest.TestCase):
         elif "OPENAI_API_KEY" in os.environ: # If test set it and it wasn't there before
             del os.environ["OPENAI_API_KEY"]
 
-    @patch('openai.OpenAI')
-    def test_successful_llm_call(self, MockOpenAI):
-        # Mock the OpenAI client and its methods
-        mock_client_instance = MockOpenAI.return_value
-        mock_completion = MagicMock()
+    @patch('openai.AsyncOpenAI') # Changed to AsyncOpenAI
+    async def test_successful_llm_call(self, MockAsyncOpenAI): # Made test async
+        # Mock the AsyncOpenAI client and its methods
+        mock_client_instance = MockAsyncOpenAI.return_value
+
+        mock_completion = MagicMock() # This can stay a MagicMock
         mock_completion.choices = [MagicMock(message=MagicMock(content="Test LLM response"))]
         mock_completion.id = "cmpl-test123"
         mock_completion.usage = MagicMock(prompt_tokens=10, completion_tokens=5, total_tokens=15)
-        mock_client_instance.chat.completions.create.return_value = mock_completion
+
+        # .create method of chat.completions needs to be an AsyncMock
+        mock_client_instance.chat.completions.create = unittest.mock.AsyncMock(return_value=mock_completion)
 
         pil_program = create_prompt_test_program(
             prompt_text="Hello {{name}}",
-            api_key="test_key_from_config", # Test config key usage
+            api_key="test_key_from_config",
             parameters={"temperature": 0.5}
         )
         interpreter = Interpreter(pil_program, initial_vars={"name": "World"}, debug_mode=True)
 
-        # The first step in the workflow is the PromptStep
         prompt_step_obj = pil_program.workflow.steps[0]
 
-        response = interpreter._execute_prompt_step(prompt_step_obj)
+        response = await interpreter._execute_prompt_step(prompt_step_obj) # Added await
 
         self.assertEqual(response, "Test LLM response")
-        mock_client_instance.chat.completions.create.assert_called_once()
+        mock_client_instance.chat.completions.create.assert_awaited_once() # Changed to assert_awaited_once
         call_args = mock_client_instance.chat.completions.create.call_args
 
         self.assertEqual(call_args.kwargs['model'], "gpt-test-model")
@@ -97,40 +99,41 @@ class TestInterpreterPromptStep(unittest.TestCase):
         self.assertEqual(call_args.kwargs['temperature'], 0.5)
 
         # Check if client was initialized with the config key
-        MockOpenAI.assert_called_with(api_key="test_key_from_config")
+        MockAsyncOpenAI.assert_called_with(api_key="test_key_from_config")
 
 
     @patch.dict(os.environ, {"OPENAI_API_KEY": "test_key_from_env"})
-    @patch('openai.OpenAI')
-    def test_llm_call_with_env_api_key(self, MockOpenAI):
-        mock_client_instance = MockOpenAI.return_value
-        mock_client_instance.chat.completions.create.return_value = MagicMock(choices=[MagicMock(message=MagicMock(content="Env key response"))])
+    @patch('openai.AsyncOpenAI') # Changed to AsyncOpenAI
+    async def test_llm_call_with_env_api_key(self, MockAsyncOpenAI): # Made test async
+        mock_client_instance = MockAsyncOpenAI.return_value
+        mock_client_instance.chat.completions.create = unittest.mock.AsyncMock(
+            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content="Env key response"))])
+        )
 
-        # Program does NOT provide api_key in config, so it should use env var
         pil_program = create_prompt_test_program(prompt_text="Test prompt")
 
-        # Interpreter initialization will trigger _initialize_llm_client
-        interpreter = Interpreter(pil_program)
-        MockOpenAI.assert_called_with(api_key="test_key_from_env") # Check client init
+        interpreter = Interpreter(pil_program) # Instantiation is sync
+        MockAsyncOpenAI.assert_called_with(api_key="test_key_from_env")
 
         prompt_step_obj = pil_program.workflow.steps[0]
-        response = interpreter._execute_prompt_step(prompt_step_obj)
+        response = await interpreter._execute_prompt_step(prompt_step_obj) # Added await
         self.assertEqual(response, "Env key response")
+        mock_client_instance.chat.completions.create.assert_awaited_once()
 
 
-    def test_llm_call_no_api_key_raises_error(self):
-        # No API key in config, and OPENAI_API_KEY is unset by setUp.
-        # Program has a model, so initialization will fail.
+    async def test_llm_call_no_api_key_raises_error(self): # Made test async (though not strictly necessary as error is sync)
         pil_program = create_prompt_test_program(prompt_text="Test prompt", model_name="gpt-test-model", api_key=None)
 
         with self.assertRaisesRegex(ConfigurationError, "API key not found .* for model 'gpt-test-model'"):
-            Interpreter(pil_program) # Error should occur at Interpreter instantiation
+            Interpreter(pil_program)
 
 
-    @patch('openai.OpenAI')
-    def test_llm_call_with_persona_and_examples(self, MockOpenAI):
-        mock_client_instance = MockOpenAI.return_value
-        mock_client_instance.chat.completions.create.return_value = MagicMock(choices=[MagicMock(message=MagicMock(content="Response"))])
+    @patch('openai.AsyncOpenAI') # Changed to AsyncOpenAI
+    async def test_llm_call_with_persona_and_examples(self, MockAsyncOpenAI): # Made test async
+        mock_client_instance = MockAsyncOpenAI.return_value
+        mock_client_instance.chat.completions.create = unittest.mock.AsyncMock(
+            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content="Response"))])
+        )
 
         pil_program = create_prompt_test_program(
             prompt_text="User question: {{query}}",
@@ -148,42 +151,42 @@ class TestInterpreterPromptStep(unittest.TestCase):
             interpreter.context.set_variable("__persona__", pil_program.persona)
 
         prompt_step_obj = pil_program.workflow.steps[0]
-        interpreter._execute_prompt_step(prompt_step_obj)
+        await interpreter._execute_prompt_step(prompt_step_obj) # Added await
 
-        mock_client_instance.chat.completions.create.assert_called_once()
+        mock_client_instance.chat.completions.create.assert_awaited_once() # Changed to assert_awaited_once
         call_args = mock_client_instance.chat.completions.create.call_args
         messages = call_args.kwargs['messages']
 
-        self.assertEqual(messages[0], {"role": "system", "content": "Role: Helpful Assistant, Style: concise"}) # Corrected expected system message
+        self.assertEqual(messages[0], {"role": "system", "content": "Role: Helpful Assistant, Style: concise"})
         self.assertEqual(messages[1], {"role": "user", "content": "What is 1+1?"})
         self.assertEqual(messages[2], {"role": "assistant", "content": "2"})
         self.assertEqual(messages[3], {"role": "user", "content": "What is the capital of France?"})
         self.assertEqual(messages[4], {"role": "assistant", "content": "Paris"})
         self.assertEqual(messages[5], {"role": "user", "content": "User question: What is PIL?"})
 
-    # Test various OpenAI API errors
-    @patch('openai.OpenAI')
-    def test_llm_api_connection_error(self, MockOpenAI):
-        mock_client_instance = MockOpenAI.return_value
-        mock_client_instance.chat.completions.create.side_effect = openai.APIConnectionError(request=MagicMock())
+    @patch('openai.AsyncOpenAI') # Changed to AsyncOpenAI
+    async def test_llm_api_connection_error(self, MockAsyncOpenAI): # Made test async
+        mock_client_instance = MockAsyncOpenAI.return_value
+        mock_client_instance.chat.completions.create = unittest.mock.AsyncMock(
+            side_effect=openai.APIConnectionError(request=MagicMock())
+        )
 
         pil_program = create_prompt_test_program(prompt_text="test", api_key="fake")
         interpreter = Interpreter(pil_program)
         prompt_step_obj = pil_program.workflow.steps[0]
 
         with self.assertRaisesRegex(ConnectionError, "OpenAI API request failed to connect"):
-            interpreter._execute_prompt_step(prompt_step_obj)
+            await interpreter._execute_prompt_step(prompt_step_obj) # Added await
 
-    @patch('openai.OpenAI')
-    def test_llm_authentication_error(self, MockOpenAI):
-        mock_client_instance = MockOpenAI.return_value
-        # Simulate AuthenticationError (ensure you have a response object for the error if needed by the lib)
+    @patch('openai.AsyncOpenAI') # Changed to AsyncOpenAI
+    async def test_llm_authentication_error(self, MockAsyncOpenAI): # Made test async
+        mock_client_instance = MockAsyncOpenAI.return_value
         mock_response = MagicMock()
         mock_response.status_code = 401
-        mock_response.json.return_value = {"error": {"message": "Incorrect API key provided"}} # Example error structure
+        mock_response.json.return_value = {"error": {"message": "Incorrect API key provided"}}
 
-        mock_client_instance.chat.completions.create.side_effect = openai.AuthenticationError(
-            message="Incorrect API key.", response=mock_response, body=None
+        mock_client_instance.chat.completions.create = unittest.mock.AsyncMock(
+            side_effect=openai.AuthenticationError(message="Incorrect API key.", response=mock_response, body=None)
         )
 
         pil_program = create_prompt_test_program(prompt_text="test", api_key="fake")
@@ -191,34 +194,33 @@ class TestInterpreterPromptStep(unittest.TestCase):
         prompt_step_obj = pil_program.workflow.steps[0]
 
         with self.assertRaisesRegex(PermissionError, "OpenAI API authentication failed"):
-            interpreter._execute_prompt_step(prompt_step_obj)
+            await interpreter._execute_prompt_step(prompt_step_obj) # Added await
 
-    @patch('openai.OpenAI')
-    def test_llm_rate_limit_error(self, MockOpenAI):
-        mock_client_instance = MockOpenAI.return_value
+    @patch('openai.AsyncOpenAI') # Changed to AsyncOpenAI
+    async def test_llm_rate_limit_error(self, MockAsyncOpenAI): # Made test async
+        mock_client_instance = MockAsyncOpenAI.return_value
         mock_response = MagicMock()
         mock_response.status_code = 429
-        mock_client_instance.chat.completions.create.side_effect = openai.RateLimitError(
-            message="Rate limit exceeded.", response=mock_response, body=None
+        mock_client_instance.chat.completions.create = unittest.mock.AsyncMock(
+            side_effect=openai.RateLimitError(message="Rate limit exceeded.", response=mock_response, body=None)
         )
 
         pil_program = create_prompt_test_program(prompt_text="test", api_key="fake")
         interpreter = Interpreter(pil_program)
         prompt_step_obj = pil_program.workflow.steps[0]
 
-        with self.assertRaisesRegex(PermissionError, "OpenAI API request exceeded rate limit"): # Changed from ConnectionAbortedError
-            interpreter._execute_prompt_step(prompt_step_obj)
+        with self.assertRaisesRegex(PermissionError, "OpenAI API request exceeded rate limit"):
+            await interpreter._execute_prompt_step(prompt_step_obj) # Added await
 
-    @patch('openai.OpenAI')
-    def test_llm_generic_api_status_error(self, MockOpenAI):
-        mock_client_instance = MockOpenAI.return_value
+    @patch('openai.AsyncOpenAI') # Changed to AsyncOpenAI
+    async def test_llm_generic_api_status_error(self, MockAsyncOpenAI): # Made test async
+        mock_client_instance = MockAsyncOpenAI.return_value
         mock_response = MagicMock(status_code=500, text="Internal Server Error")
-        # To make it look more like a httpx.Response for openai >1.0
         mock_response.json = lambda: {"error": {"message": "Server error"}}
         mock_response.headers = {}
 
-        mock_client_instance.chat.completions.create.side_effect = openai.APIStatusError(
-            message="API error.", response=mock_response, body=None
+        mock_client_instance.chat.completions.create = unittest.mock.AsyncMock(
+            side_effect=openai.APIStatusError(message="API error.", response=mock_response, body=None)
         )
 
         pil_program = create_prompt_test_program(prompt_text="test", api_key="fake")
@@ -226,15 +228,17 @@ class TestInterpreterPromptStep(unittest.TestCase):
         prompt_step_obj = pil_program.workflow.steps[0]
 
         with self.assertRaisesRegex(RuntimeError, "OpenAI API returned an error status 500"):
-            interpreter._execute_prompt_step(prompt_step_obj)
+            await interpreter._execute_prompt_step(prompt_step_obj) # Added await
 
     # --- Tests for PromptStep with Constraints ---
-    @patch('openai.OpenAI')
-    def test_prompt_step_with_valid_constraint(self, MockOpenAI):
-        mock_client_instance = MockOpenAI.return_value
-        mock_client_instance.chat.completions.create.return_value = MagicMock(choices=[MagicMock(message=MagicMock(content="123"))])
+    @patch('openai.AsyncOpenAI') # Changed to AsyncOpenAI
+    async def test_prompt_step_with_valid_constraint(self, MockAsyncOpenAI): # Made test async
+        mock_client_instance = MockAsyncOpenAI.return_value
+        mock_client_instance.chat.completions.create = unittest.mock.AsyncMock(
+            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content="123"))])
+        )
 
-        prompt_step_dict = {
+        prompt_step_dict = { # This dict is not used to create the program directly here
             "text": "Get a number",
             "constraints": {"type": "integer"}
         }
@@ -249,55 +253,63 @@ class TestInterpreterPromptStep(unittest.TestCase):
         interpreter = Interpreter(pil_program)
         prompt_step_obj = pil_program.workflow.steps[0]
 
-        output = interpreter._execute_prompt_step(prompt_step_obj)
-        self.assertEqual(output, 123) # Should be converted to int
+        output = await interpreter._execute_prompt_step(prompt_step_obj) # Added await
+        self.assertEqual(output, 123)
+        mock_client_instance.chat.completions.create.assert_awaited_once()
 
-    @patch('openai.OpenAI')
-    def test_prompt_step_with_invalid_constraint(self, MockOpenAI):
-        mock_client_instance = MockOpenAI.return_value
-        mock_client_instance.chat.completions.create.return_value = MagicMock(choices=[MagicMock(message=MagicMock(content="not_a_number"))])
+
+    @patch('openai.AsyncOpenAI') # Changed to AsyncOpenAI
+    async def test_prompt_step_with_invalid_constraint(self, MockAsyncOpenAI): # Made test async
+        mock_client_instance = MockAsyncOpenAI.return_value
+        mock_client_instance.chat.completions.create = unittest.mock.AsyncMock(
+            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content="not_a_number"))])
+        )
 
         pil_program = create_prompt_test_program(
             prompt_text="Get a number",
             api_key="fake_key"
         )
-        # Get the PromptStep object and set constraints and max_retries
         prompt_step_obj = pil_program.workflow.steps[0]
         prompt_step_obj.constraints = Constraints.from_yaml({"type": "integer"})
-        prompt_step_obj.max_retries = 0 # Explicitly no retries for this test
+        prompt_step_obj.max_retries = 0
 
         interpreter = Interpreter(pil_program)
-        # prompt_step_obj = pil_program.workflow.steps[0] # Already got it
 
         with self.assertRaisesRegex(ConstraintViolationError, "Type constraint violated.*Cannot convert value to 'integer'"):
-            interpreter._execute_prompt_step(prompt_step_obj)
-        mock_client_instance.chat.completions.create.assert_called_once()
+            await interpreter._execute_prompt_step(prompt_step_obj) # Added await
+        mock_client_instance.chat.completions.create.assert_awaited_once() # Changed
 
 
     # --- Tests for Self-Correction Loop ---
-    @patch('openai.OpenAI')
-    def test_self_correction_no_retries_needed(self, MockOpenAI):
-        mock_client = MockOpenAI.return_value
-        mock_client.chat.completions.create.return_value = MagicMock(choices=[MagicMock(message=MagicMock(content="123"))])
+    @patch('openai.AsyncOpenAI') # Changed to AsyncOpenAI
+    async def test_self_correction_no_retries_needed(self, MockAsyncOpenAI): # Made test async
+        mock_client = MockAsyncOpenAI.return_value
+        mock_client.chat.completions.create = unittest.mock.AsyncMock(
+            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content="123"))])
+        )
 
         program = create_prompt_test_program(prompt_text="Give a number", api_key="dummy")
         prompt_step = program.workflow.steps[0]
         prompt_step.constraints = Constraints.from_yaml({"type": "integer"})
-        prompt_step.max_retries = 1 # Allow retries, though not needed
+        prompt_step.max_retries = 1
 
         interpreter = Interpreter(program)
-        result = interpreter._execute_prompt_step(prompt_step)
+        result = await interpreter._execute_prompt_step(prompt_step) # Added await
 
         self.assertEqual(result, 123)
-        mock_client.chat.completions.create.assert_called_once() # Called only once
+        mock_client.chat.completions.create.assert_awaited_once()
 
-    @patch('openai.OpenAI')
-    def test_self_correction_succeeds_on_retry(self, MockOpenAI):
-        mock_client = MockOpenAI.return_value
-        mock_client.chat.completions.create.side_effect = [
-            MagicMock(choices=[MagicMock(message=MagicMock(content="not an int"))]), # First call fails
-            MagicMock(choices=[MagicMock(message=MagicMock(content="42"))])          # Second call succeeds
+    @patch('openai.AsyncOpenAI') # Changed to AsyncOpenAI
+    async def test_self_correction_succeeds_on_retry(self, MockAsyncOpenAI): # Made test async
+        mock_client = MockAsyncOpenAI.return_value
+        # Configure AsyncMock to handle multiple side effect values for await
+        async_mock_create = unittest.mock.AsyncMock()
+        async_mock_create.side_effect = [
+            MagicMock(choices=[MagicMock(message=MagicMock(content="not an int"))]),
+            MagicMock(choices=[MagicMock(message=MagicMock(content="42"))])
         ]
+        mock_client.chat.completions.create = async_mock_create
+
 
         program = create_prompt_test_program(prompt_text="Initial prompt", api_key="dummy")
         prompt_step = program.workflow.steps[0]
@@ -305,12 +317,11 @@ class TestInterpreterPromptStep(unittest.TestCase):
         prompt_step.max_retries = 1
 
         interpreter = Interpreter(program)
-        result = interpreter._execute_prompt_step(prompt_step)
+        result = await interpreter._execute_prompt_step(prompt_step) # Added await
 
         self.assertEqual(result, 42)
-        self.assertEqual(mock_client.chat.completions.create.call_count, 2)
+        self.assertEqual(mock_client.chat.completions.create.await_count, 2) # Changed
 
-        # Check that the second call's prompt included correction info
         second_call_args = mock_client.chat.completions.create.call_args_list[1]
         messages_for_retry = second_call_args.kwargs['messages']
         last_user_message_for_retry = messages_for_retry[-1]['content']
@@ -318,31 +329,32 @@ class TestInterpreterPromptStep(unittest.TestCase):
         self.assertIn("Initial prompt", last_user_message_for_retry)
         self.assertIn("[System Correction]", last_user_message_for_retry)
         self.assertIn("Your previous response failed validation.", last_user_message_for_retry)
-        self.assertIn("Error: \"Type constraint violated", last_user_message_for_retry) # Part of ConstraintViolationError message
-        self.assertIn("not an int", last_user_message_for_retry) # The failing value
+        self.assertIn("Error: \"Type constraint violated", last_user_message_for_retry)
+        self.assertIn("not an int", last_user_message_for_retry)
 
-    @patch('openai.OpenAI')
-    def test_self_correction_all_retries_fail(self, MockOpenAI):
-        mock_client = MockOpenAI.return_value
-        mock_client.chat.completions.create.side_effect = [
+    @patch('openai.AsyncOpenAI') # Changed to AsyncOpenAI
+    async def test_self_correction_all_retries_fail(self, MockAsyncOpenAI): # Made test async
+        mock_client = MockAsyncOpenAI.return_value
+        async_mock_create = unittest.mock.AsyncMock()
+        async_mock_create.side_effect = [
             MagicMock(choices=[MagicMock(message=MagicMock(content="fail1"))]),
             MagicMock(choices=[MagicMock(message=MagicMock(content="fail2"))])
         ]
+        mock_client.chat.completions.create = async_mock_create
 
         program = create_prompt_test_program(prompt_text="Initial prompt", api_key="dummy")
         prompt_step = program.workflow.steps[0]
         prompt_step.constraints = Constraints.from_yaml({"type": "integer"})
-        prompt_step.max_retries = 1 # One initial call, one retry
+        prompt_step.max_retries = 1
 
         interpreter = Interpreter(program)
 
         with self.assertRaisesRegex(ConstraintViolationError, "Cannot convert value to 'integer'") as cm:
-            interpreter._execute_prompt_step(prompt_step) # Call only once
+            await interpreter._execute_prompt_step(prompt_step) # Added await
 
-        self.assertEqual(mock_client.chat.completions.create.call_count, 2) # Initial + 1 retry
+        self.assertEqual(mock_client.chat.completions.create.await_count, 2) # Changed
 
-        # Verify the error message contains details from the *last* failure
-        self.assertIn("fail2", str(cm.exception.constrained_value)) # Access exception from context manager
+        self.assertIn("fail2", str(cm.exception.constrained_value))
 
 
 if __name__ == '__main__':
