@@ -3,7 +3,7 @@ import asteval # For CodeStep execution sandbox
 from typing import Dict, Any, Optional, List
 
 from .core.components import (
-    PilProgram, parse_step, BaseStep, PromptStep, RetrieveStep, ToolStep, CodeStep, IfStep, LoopStep, ActualStepType
+    PilProgram, parse_step, BaseStep, PromptStep, RetrieveStep, ToolStep, CodeStep, IfStep, LoopStep, StepType, LoopType
 )
 from .core.context import Context
 from .utils import render_template_string, safe_eval_code_string
@@ -191,8 +191,7 @@ class Interpreter:
         elif isinstance(step_obj, IfStep):
             self._execute_if_step(step_obj)
         elif isinstance(step_obj, LoopStep):
-            print(f"    WARNING: LoopStep execution not fully implemented.")
-            output = "simulated_loop_output"
+            output = self._execute_loop_step(step_obj)
         else:
             raise TypeError(f"Unknown step type: {step_type_name}")
 
@@ -301,7 +300,7 @@ class Interpreter:
         else:
             print(f"    - Condition is false, no 'else' branch to execute.")
 
-    def _execute_workflow_steps(self, steps: List[ActualStepType], branch_name: str = "main_workflow") -> Any:
+    def _execute_workflow_steps(self, steps: List[StepType], branch_name: str = "main_workflow") -> Any:
         """Executes a list of steps, typically a workflow or a branch of an IfStep."""
         self._add_trace_log("WORKFLOW_BRANCH_START", branch=branch_name, num_steps=len(steps))
         last_output = None
@@ -312,20 +311,121 @@ class Interpreter:
         self._add_trace_log("WORKFLOW_BRANCH_END", branch=branch_name, last_output=str(last_output))
         return last_output
 
+    def _execute_loop_step(self, step: LoopStep) -> Optional[List[Any]]:
+        """Executes a LoopStep based on its parsed type and parameters."""
+        self._add_trace_log("LOOP_STEP_START", loop_type=str(step.loop_type), expression=step.expression)
+
+        iteration_results = []
+        original_context = self.context # Stash the original context
+
+        if step.loop_type == LoopType.FOR_EACH:
+            if not step.iterable_var_name or not step.loop_var_name:
+                raise ValueError("LoopStep FOR_EACH is missing iterable_var_name or loop_var_name.")
+
+            iterable_collection = original_context.get_variable(step.iterable_var_name, None)
+            if iterable_collection is None:
+                raise ValueError(f"Iterable '{step.iterable_var_name}' not found in context for FOR_EACH loop.")
+            if not hasattr(iterable_collection, '__iter__') or isinstance(iterable_collection, str): # strings are iterable but usually not what's intended for item-wise iteration here
+                raise TypeError(f"Variable '{step.iterable_var_name}' is not an iterable collection for FOR_EACH loop.")
+
+            for item_index, item_value in enumerate(iterable_collection):
+                iteration_context = Context(initial_vars=original_context.get_all_variables())
+                iteration_context.set_variable(step.loop_var_name, item_value)
+                # Potentially add index variable, e.g., f"{step.loop_var_name}_index"
+                # iteration_context.set_variable(f"{step.loop_var_name}_index", item_index)
+
+                self.context = iteration_context # Temporarily swap context for inner steps
+                self._add_trace_log("LOOP_ITERATION_START", loop_type="FOR_EACH", iteration=item_index, loop_var=step.loop_var_name, value=item_value)
+                last_iteration_output = self._execute_workflow_steps(step.steps, branch_name=f"loop_for_each_iter_{item_index}")
+                iteration_results.append(last_iteration_output)
+                self._add_trace_log("LOOP_ITERATION_END", loop_type="FOR_EACH", iteration=item_index, output=last_iteration_output)
+
+            self.context = original_context # Restore original context
+
+        elif step.loop_type == LoopType.FOR_RANGE:
+            if not step.loop_var_name or not step.range_args_str:
+                raise ValueError("LoopStep FOR_RANGE is missing loop_var_name or range_args_str.")
+
+            # Evaluate range arguments. They can be numbers or context variable expressions.
+            eval_args = []
+            for arg_str in step.range_args_str:
+                val = safe_eval_code_string(arg_str, original_context.get_all_variables())
+                if not isinstance(val, int):
+                    raise TypeError(f"Range argument '{arg_str}' (rendered: {val}) must evaluate to an integer.")
+                eval_args.append(val)
+
+            if not 1 <= len(eval_args) <= 3:
+                raise ValueError(f"Invalid number of arguments for range: {len(eval_args)}. Expected 1, 2, or 3.")
+
+            for i_val in range(*eval_args):
+                iteration_context = Context(initial_vars=original_context.get_all_variables())
+                iteration_context.set_variable(step.loop_var_name, i_val)
+
+                self.context = iteration_context # Temporarily swap context
+                self._add_trace_log("LOOP_ITERATION_START", loop_type="FOR_RANGE", iteration_value=i_val, loop_var=step.loop_var_name)
+                last_iteration_output = self._execute_workflow_steps(step.steps, branch_name=f"loop_for_range_iter_{i_val}")
+                iteration_results.append(last_iteration_output)
+                self._add_trace_log("LOOP_ITERATION_END", loop_type="FOR_RANGE", iteration_value=i_val, output=last_iteration_output)
+
+            self.context = original_context # Restore
+
+        elif step.loop_type == LoopType.WHILE:
+            if not step.condition_expr:
+                raise ValueError("LoopStep WHILE is missing condition_expr.")
+
+            iteration_count = 0
+            # WHILE loop steps operate directly on the original_context (self.context)
+            # so that changes within the loop body can affect the condition.
+            while True:
+                condition_result = safe_eval_code_string(step.condition_expr, self.context.get_all_variables())
+                if not isinstance(condition_result, bool):
+                    raise TypeError(f"While loop condition '{step.condition_expr}' must evaluate to a boolean. Got: {condition_result}")
+
+                self._add_trace_log("LOOP_CONDITION_EVAL", loop_type="WHILE", condition=step.condition_expr, result=condition_result)
+                if not condition_result:
+                    break
+
+                self._add_trace_log("LOOP_ITERATION_START", loop_type="WHILE", iteration=iteration_count)
+                # For WHILE, steps are executed in the current context (original_context)
+                last_iteration_output = self._execute_workflow_steps(step.steps, branch_name=f"loop_while_iter_{iteration_count}")
+                iteration_results.append(last_iteration_output)
+                self._add_trace_log("LOOP_ITERATION_END", loop_type="WHILE", iteration=iteration_count, output=last_iteration_output)
+                iteration_count += 1
+                if iteration_count > 1000: # Safety break for runaway loops
+                    self._add_trace_log("LOOP_SAFETY_BREAK", loop_type="WHILE", iterations=iteration_count)
+                    print("WARNING: While loop exceeded 1000 iterations, breaking for safety.")
+                    break
+            # No context restoration needed as we used self.context directly
+
+        else: # LoopType.INVALID or unhandled
+            self.context = original_context # Ensure context is restored if error occurs early
+            raise NotImplementedError(f"Loop type '{step.loop_type}' is not implemented or LoopStep was not parsed correctly.")
+
+        self._add_trace_log("LOOP_STEP_END", loop_type=str(step.loop_type), num_iterations=len(iteration_results), aggregated_results_count=len(iteration_results))
+
+        if step.def_var: # If the loop itself is meant to define a variable (e.g. list of results)
+            return iteration_results
+        return None # Loop executed for side effects, no specific aggregated output defined by loop itself
+
 
     def run(self, inputs: Optional[Dict[str, Any]] = None) -> Any:
         self._add_trace_log("INTERPRETER_RUN_START", pil_program_config_model=self.pil_program.config.model if self.pil_program.config else "N/A")
         print(f"Interpreter: Running PIL program...")
 
-        if inputs:
-            self._validate_inputs(inputs)
-        else:
-            if self.pil_program.input and self.pil_program.input.vars:
-                required_vars = [var.name for var in self.pil_program.input.vars]
-                if required_vars:
-                    err_msg = f"PIL program expects input variables ({', '.join(required_vars)}), but none were provided."
-                    self._add_trace_log("INPUT_VALIDATION_ERROR", error=err_msg)
-                    raise ValueError(err_msg)
+        if inputs: # If run() is called with an inputs dict
+            self._validate_inputs(inputs) # This will add them to context and validate against program.input
+
+        # After processing explicit 'inputs' (if any), or if none were passed to run(),
+        # check if all required inputs (defined in program.input.vars) are now in the context.
+        if self.pil_program.input and self.pil_program.input.vars:
+            required_program_inputs = [var.name for var in self.pil_program.input.vars]
+            missing_vars_in_context = [req_var for req_var in required_program_inputs if not self.context.has_variable(req_var)]
+            if missing_vars_in_context:
+                err_msg = (f"Missing required input variables in context: {', '.join(missing_vars_in_context)}. "
+                           f"Defined inputs in program: {required_program_inputs}. Ensure they are provided either via "
+                           f"Interpreter's initial_vars or the 'inputs' argument to run().")
+                self._add_trace_log("INPUT_VALIDATION_ERROR", error=err_msg, missing_variables=missing_vars_in_context)
+                raise ValueError(err_msg)
 
         if self.pil_program.persona and self.pil_program.persona.role:
             self.context.set_variable("__persona__", self.pil_program.persona)
