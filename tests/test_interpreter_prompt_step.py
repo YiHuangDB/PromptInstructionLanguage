@@ -6,9 +6,9 @@ import os
 import openai
 
 from pil_engine.interpreter import Interpreter, PilParser
-from pil_engine.core.components import PilProgram, PromptStep, Config, Persona, Input # Removed unused Input
+from pil_engine.core.components import PilProgram, PromptStep, Config, Persona, Constraints # Added Constraints
 from pil_engine.core.context import Context
-from pil_engine.exceptions import ConfigurationError # Added import
+from pil_engine.exceptions import ConfigurationError, ConstraintViolationError # Added ConstraintViolationError
 
 
 # Helper to create a PilProgram with a single PromptStep
@@ -226,6 +226,47 @@ class TestInterpreterPromptStep(unittest.TestCase):
         prompt_step_obj = pil_program.workflow.steps[0]
 
         with self.assertRaisesRegex(RuntimeError, "OpenAI API returned an error status 500"):
+            interpreter._execute_prompt_step(prompt_step_obj)
+
+    # --- Tests for PromptStep with Constraints ---
+    @patch('openai.OpenAI')
+    def test_prompt_step_with_valid_constraint(self, MockOpenAI):
+        mock_client_instance = MockOpenAI.return_value
+        mock_client_instance.chat.completions.create.return_value = MagicMock(choices=[MagicMock(message=MagicMock(content="123"))])
+
+        prompt_step_dict = {
+            "text": "Get a number",
+            "constraints": {"type": "integer"}
+        }
+        pil_program = create_prompt_test_program(
+            prompt_text="Get a number", # Text here is just for completeness, mock will return "123"
+            api_key="fake_key"
+            # Constraints are added manually to the step object below
+        )
+        # Modify the step object directly to add constraints
+        pil_program.workflow.steps[0].constraints = Constraints.from_yaml({"type": "integer"})
+
+        interpreter = Interpreter(pil_program)
+        prompt_step_obj = pil_program.workflow.steps[0]
+
+        output = interpreter._execute_prompt_step(prompt_step_obj)
+        self.assertEqual(output, 123) # Should be converted to int
+
+    @patch('openai.OpenAI')
+    def test_prompt_step_with_invalid_constraint(self, MockOpenAI):
+        mock_client_instance = MockOpenAI.return_value
+        mock_client_instance.chat.completions.create.return_value = MagicMock(choices=[MagicMock(message=MagicMock(content="not_a_number"))])
+
+        pil_program = create_prompt_test_program(
+            prompt_text="Get a number",
+            api_key="fake_key"
+        )
+        pil_program.workflow.steps[0].constraints = Constraints.from_yaml({"type": "integer"})
+
+        interpreter = Interpreter(pil_program)
+        prompt_step_obj = pil_program.workflow.steps[0]
+
+        with self.assertRaisesRegex(ConstraintViolationError, "Type constraint violated.*Cannot convert value to 'integer'"):
             interpreter._execute_prompt_step(prompt_step_obj)
 
 

@@ -1,4 +1,5 @@
 import jsonschema # Allow jsonschema to be an optional import if not strictly needed by all exceptions
+from typing import Any # Import Any
 
 class PilEngineError(Exception):
     """Base class for exceptions in the PIL Engine."""
@@ -64,3 +65,24 @@ class InvalidSchemaError(PilEngineError): # Renamed from SchemaError to avoid co
 class PilParsingError(PilEngineError):
     """Exception for errors during the parsing of a PIL program string/file."""
     pass
+
+class ConstraintViolationError(PilEngineError):
+    """Exception raised when a value violates a defined constraint."""
+    def __init__(self, message: str, constraint_type: str = None, constrained_value: Any = None, constraint_details: Any = None):
+        super().__init__(message)
+        self.constraint_type = constraint_type
+        self.constrained_value = constrained_value
+        self.constraint_details = constraint_details
+
+    def __str__(self):
+        details = f"{super().__str__()}"
+        if self.constraint_type:
+            details += f" [Constraint Type: {self.constraint_type}]"
+        if self.constrained_value is not None:
+            # Truncate if too long
+            val_str = str(self.constrained_value)
+            if len(val_str) > 100: val_str = val_str[:97] + "..."
+            details += f" [Value: {val_str}]"
+        if self.constraint_details is not None:
+            details += f" [Details: {self.constraint_details}]"
+        return details

@@ -9,8 +9,9 @@ from .core.context import Context
 from .utils import render_template_string, safe_eval_code_string
 from .exceptions import ( # Import custom exceptions
     ToolNotFoundException, ToolExecutionError, OutputValidationError,
-    InvalidSchemaError, ConfigurationError
+    InvalidSchemaError, ConfigurationError, ConstraintViolationError # Added ConstraintViolationError
 )
+from .validator import apply_constraints # Import the new function
 
 import os
 import openai
@@ -398,8 +399,22 @@ class Interpreter:
             raise RuntimeError(err_msg) from e
 
         if step.constraints:
-            self._add_trace_log("CONSTRAINT_TODO", step_type="PromptStep", constraints=step.constraints, llm_output=llm_response_content)
-            print(f"    - TODO: Apply constraints to LLM output: {step.constraints}")
+            self._add_trace_log("CONSTRAINT_VALIDATION_START", step_type="PromptStep", constraints=step.constraints, value_to_validate=llm_response_content)
+            print(f"    - Applying constraints to LLM output: {step.constraints}")
+            try:
+                validated_output = apply_constraints(
+                    value=llm_response_content,
+                    constraints=step.constraints, # This is a Constraints object
+                    context=self.context,
+                    step_name=f"PromptStep (def: {step.def_var or 'N/A'})" # More context for error
+                )
+                self._add_trace_log("CONSTRAINT_VALIDATION_SUCCESS", validated_output=str(validated_output))
+                print("    - Constraint validation successful.")
+                return validated_output # Return potentially type-converted and validated output
+            except ConstraintViolationError as e:
+                self._add_trace_log("CONSTRAINT_VALIDATION_FAILED", error=str(e))
+                # Re-raise, or handle for self-correction loop in future
+                raise e
 
         return llm_response_content
 
