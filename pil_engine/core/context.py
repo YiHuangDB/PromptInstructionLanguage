@@ -18,14 +18,16 @@ class Context:
     def get_variable(self, name: str, default: Optional[Any] = None) -> Any:
         """
         Gets a variable from the context.
-        Raises KeyError if the variable is not found and no default is provided.
+        Returns the specified default value (which is None if not provided by caller)
+        if the variable is not found.
         """
-        if name not in self._variables and default is None:
-            # Consider if we want to allow a 'strict' mode that always raises
-            # or if templating engine will handle missing vars gracefully.
-            # For now, strict for direct access, templating might differ.
-            raise KeyError(f"Variable '{name}' not found in context.")
         return self._variables.get(name, default)
+
+    def get_variable_strict(self, name: str) -> Any:
+        """Gets a variable from the context. Raises KeyError if not found."""
+        if name not in self._variables:
+            raise KeyError(f"Variable '{name}' not found in context.")
+        return self._variables[name]
 
     def has_variable(self, name: str) -> bool:
         """Checks if a variable exists in the context."""

@@ -1,9 +1,13 @@
+from __future__ import annotations # Must be the first line
+
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union
 
 # Type aliases for better readability
 YamlData = Dict[str, Any]
-StepType = Union['PromptStep', 'RetrieveStep', 'ToolStep', 'CodeStep', 'IfStep', 'LoopStep'] # Forward declaration for type hinting
+# StepType still needs to use forward references (strings) if defined before component classes.
+# from __future__ import annotations handles this for type hints within class/function bodies.
+StepType = Union['PromptStep', 'RetrieveStep', 'ToolStep', 'CodeStep', 'IfStep', 'LoopStep']
 
 @dataclass
 class Config:
@@ -85,7 +89,10 @@ class OutputSchema:
 
 @dataclass
 class BaseStep:
-    def_var: Optional[str] = None # Stores the name of the variable to define with the step's output
+    # def_var is now a required argument in the generated __init__,
+    # but Optional, so None can be passed.
+    # from_yaml methods will pass data.get('def'), which handles missing 'def' by passing None.
+    def_var: Optional[str]
 
     def __post_init__(self):
         # Common logic for all steps, if any.
@@ -97,15 +104,21 @@ class BaseStep:
 class PromptStep(BaseStep):
     text: str
     examples: List[Dict[str, str]] = field(default_factory=list) # List of {"input": "...", "output": "..."}
-    constraints: Optional[Dict[str, Any]] = None # Simplified for now
+    constraints: Optional[Constraints] = None # Changed from Dict to Constraints object
+    max_retries: int = 0 # Maximum number of self-correction retries
     # def_var is inherited for the output variable name
 
     @classmethod
     def from_yaml(cls, data: YamlData) -> 'PromptStep':
+        # Ensure 'constraints' data is parsed into a Constraints object if present
+        constraints_data = data.get('constraints')
+        parsed_constraints = Constraints.from_yaml(constraints_data) if constraints_data else None
+
         return cls(
             text=data['text'],
             examples=data.get('examples', []),
-            constraints=data.get('constraints'),
+            constraints=parsed_constraints,
+            max_retries=int(data.get('max_retries', 0)), # Ensure it's an int
             def_var=data.get('def')
         )
 
@@ -156,8 +169,8 @@ class CodeStep(BaseStep):
 @dataclass
 class IfStep(BaseStep): # BaseStep might not be fully applicable here if 'def' is not typical for 'if'
     condition: str # An expression to be evaluated
-    then_steps: List[Any] = field(default_factory=list) # List of Step objects
-    else_steps: List[Any] = field(default_factory=list) # List of Step objects
+    then_steps: List[StepType] = field(default_factory=list) # List of Step objects
+    else_steps: List[StepType] = field(default_factory=list) # List of Step objects
 
     @classmethod
     def from_yaml(cls, data: YamlData, step_parser_func: callable) -> 'IfStep':
@@ -169,30 +182,108 @@ class IfStep(BaseStep): # BaseStep might not be fully applicable here if 'def' i
             def_var=data.get('def') # Though unusual for an if block itself
         )
 
+import re
+from enum import Enum, auto
+
+class LoopType(Enum):
+    FOR_EACH = auto()
+    FOR_RANGE = auto()
+    WHILE = auto()
+    INVALID = auto() # For parsing errors or unrecognized patterns
+
 @dataclass
-class LoopStep(BaseStep): # TODO: Define loop semantics (e.g., for_each, while)
-    # For now, a simple conceptual placeholder
-    expression: str # e.g., "item in ${my_list}" or "count < 10"
-    steps: List[Any] = field(default_factory=list) # Steps to execute in each iteration
+class LoopStep(BaseStep):
+    expression: str  # Original expression string, e.g., "item in ${my_list}", "i in range(5)", "while ${count} < 10"
+    steps: List[StepType] = field(default_factory=list)  # Steps to execute in each iteration
+
+    # Fields to be populated by parsing the expression
+    loop_type: LoopType = LoopType.INVALID
+    loop_var_name: Optional[str] = None  # e.g., "item" or "i"
+    iterable_var_name: Optional[str] = None  # e.g., "my_list" (name of variable in context)
+    range_args_str: Optional[List[str]] = None  # e.g., ["5"] or ["0", "10", "2"] (as strings, to be evaluated later)
+    condition_expr: Optional[str] = None  # e.g., "${count} < 10"
+
+    # Regex patterns for parsing loop expressions
+    _FOR_EACH_PATTERN = re.compile(r"^\s*(\w+)\s+in\s+\$\{(\w+)\}\s*$") # "item in ${collection}"
+    _FOR_RANGE_PATTERN = re.compile(r"^\s*(\w+)\s+in\s+range\s*\((.+)\)\s*$") # "i in range(...)"
+    _WHILE_PATTERN = re.compile(r"^\s*while\s+(.+)\s*$") # "while condition"
 
     @classmethod
     def from_yaml(cls, data: YamlData, step_parser_func: callable) -> 'LoopStep':
-        # This is a simplified placeholder. Real loop implementation would be more complex.
-        # It needs to define how 'expression' is used (e.g. 'for', 'while', 'count')
-        # and how loop variables are handled.
         loop_type_key = None
-        for key in ['for', 'while', 'loop']: # 'loop' is generic from doc
-             if key in data:
-                 loop_type_key = key
-                 break
-        if not loop_type_key:
-            raise ValueError("Loop step must contain 'for', 'while', or 'loop' key.")
+        expression_str = None
 
-        return cls(
-            expression=data[loop_type_key],
+        if 'for' in data:
+            loop_type_key = 'for'
+            expression_str = data['for']
+        elif 'while' in data:
+            loop_type_key = 'while'
+            expression_str = data['while']
+        elif 'loop' in data: # Generic 'loop' key, could be a 'while true' or a more complex future type
+            # For now, assume 'loop' implies a while-like structure if it's not 'for'
+            # Or treat it as an error if expression doesn't match 'while' pattern
+            loop_type_key = 'loop' # Treat as 'while' for parsing for now
+            expression_str = data['loop']
+        else:
+            raise ValueError("Loop step must contain 'for', 'while', or 'loop' key defining the loop expression.")
+
+        if not isinstance(expression_str, str):
+            raise ValueError(f"Loop expression for '{loop_type_key}' must be a string. Got: {expression_str}")
+
+        instance = cls(
+            expression=expression_str,
             steps=[step_parser_func(step_data) for step_data in data.get('steps', [])],
-            def_var=data.get('def') # Output of a loop could be an aggregation
+            def_var=data.get('def')
         )
+
+        # Parse the expression string
+        if loop_type_key == 'for':
+            # Try "for ... in range(...)"
+            match_range = cls._FOR_RANGE_PATTERN.match(expression_str)
+            if match_range:
+                instance.loop_type = LoopType.FOR_RANGE
+                instance.loop_var_name = match_range.group(1)
+                # Split args by comma, strip whitespace. Args will be evaluated later.
+                instance.range_args_str = [arg.strip() for arg in match_range.group(2).split(',')]
+                if not instance.range_args_str or not all(instance.range_args_str): # check for empty strings after split
+                    raise ValueError(f"Invalid range arguments in 'for' loop: {expression_str}")
+                return instance
+
+            # Try "for ... in ${...}"
+            match_each = cls._FOR_EACH_PATTERN.match(expression_str)
+            if match_each:
+                instance.loop_type = LoopType.FOR_EACH
+                instance.loop_var_name = match_each.group(1)
+                instance.iterable_var_name = match_each.group(2) # This is the name of the variable in context
+                return instance
+
+            instance.loop_type = LoopType.INVALID
+            raise ValueError(f"Invalid 'for' loop expression format: '{expression_str}'. Expected 'item in ${{collection}}' or 'i in range(...)'.")
+
+        elif loop_type_key == 'while' or loop_type_key == 'loop': # Treat 'loop' as 'while' for now
+            # If 'loop' key is used, we assume it's a condition, similar to 'while'
+            # For 'while' or 'loop' as while: "while condition" or "condition"
+            condition_candidate = expression_str
+            if expression_str.lower().startswith("while "): # If it explicitly says "while condition"
+                match_while = cls._WHILE_PATTERN.match(expression_str)
+                if match_while:
+                    condition_candidate = match_while.group(1).strip()
+                else: # Should not happen if it starts with "while " due to regex structure
+                    instance.loop_type = LoopType.INVALID
+                    raise ValueError(f"Malformed 'while' expression: '{expression_str}'")
+
+            if not condition_candidate: # Check if condition is empty after stripping "while "
+                 instance.loop_type = LoopType.INVALID
+                 raise ValueError(f"Empty condition in '{loop_type_key}' loop: '{expression_str}'")
+
+            instance.loop_type = LoopType.WHILE
+            instance.condition_expr = condition_candidate # The part to be evaluated as boolean
+            return instance
+
+        # Should have been caught by initial key check, but as a fallback:
+        instance.loop_type = LoopType.INVALID
+        raise ValueError(f"Could not determine loop type or parse expression: '{expression_str}'")
+
 
 @dataclass
 class Constraints: # As per Table 2, this is a top-level component for output.
@@ -290,38 +381,9 @@ def parse_step(step_data: Dict[str, Any]) -> StepType:
 
     raise ValueError(f"Unknown or malformed step type: {step_data}. Ensure step is defined correctly (e.g., '- prompt: {{...}}').")
 
-# Update forward references now that all classes are defined
-for step_list_type in [IfStep.then_steps, IfStep.else_steps, LoopStep.steps, Workflow.steps]:
-    # This is tricky with dataclasses. A better way is to use string literal for types
-    # and then call typing.update_forward_refs() at the end of the module.
-    # For now, the StepType Union with forward declaration strings handles this.
-    pass
-import typing
-typing.update_forward_refs(Config)
-typing.update_forward_refs(Persona)
-typing.update_forward_refs(Input)
-typing.update_forward_refs(OutputSchema)
-typing.update_forward_refs(PromptStep)
-typing.update_forward_refs(RetrieveStep)
-typing.update_forward_refs(ToolStep)
-typing.update_forward_refs(CodeStep)
-typing.update_forward_refs(IfStep)
-typing.update_forward_refs(LoopStep)
-typing.update_forward_refs(Workflow)
-typing.update_forward_refs(PilProgram)
-typing.update_forward_refs(Constraints)
-
-# Final check: Ensure StepType Union is correctly defined
-# This might be better done by directly listing the classes in the Union
-# StepType = Union[PromptStep, RetrieveStep, ToolStep, CodeStep, IfStep, LoopStep]
-# The forward declaration string method is generally more robust for complex dependencies.
-# The current StepType = Union['PromptStep', ...] should work with update_forward_refs.
-# Let's explicitly redefine for clarity if needed after testing.
-ActualStepType = Union[PromptStep, RetrieveStep, ToolStep, CodeStep, IfStep, LoopStep]
-Workflow.steps.__type__ = List[ActualStepType]
-IfStep.then_steps.__type__ = List[ActualStepType]
-IfStep.else_steps.__type__ = List[ActualStepType]
-LoopStep.steps.__type__ = List[ActualStepType]
+# With "from __future__ import annotations", explicit update_forward_refs calls are generally not needed
+# for types defined within the same module. Python resolves them at runtime when get_type_hints is called
+# or when the annotations are otherwise processed.
 
 # Add __init__.py to core and pil_engine
 # Create pil_engine/core/__init__.py

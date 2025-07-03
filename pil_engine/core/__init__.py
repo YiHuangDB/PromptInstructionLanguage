@@ -15,7 +15,8 @@ from .components import (
     Workflow,
     PilProgram,
     parse_step,
-    ActualStepType
+    StepType,  # Use StepType instead of ActualStepType
+    LoopType   # Export LoopType as well
 )
 from .context import Context
 
@@ -36,6 +37,7 @@ __all__ = [
     "Workflow",
     "PilProgram",
     "parse_step",
-    "ActualStepType",
+    "StepType",  # Use StepType
+    "LoopType",  # Export LoopType
     "Context",
 ]
