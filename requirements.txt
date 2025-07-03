@@ -1,5 +1,5 @@
 PyYAML>=6.0 # For parsing PIL's YAML-based syntax
-# openai # Will be needed for actual LLM calls
+openai>=1.3.0 # For making LLM calls to OpenAI models
+python-dotenv>=1.0.0 # For managing API keys and configurations from .env files
 # Jinja2 # For variable substitution templating, as mentioned in the design
 # jsonschema # For validating outputSchema
-# python-dotenv # For managing API keys and configurations (good practice)

@@ -1,71 +1,50 @@
 import re
-from string import Template # For basic variable substitution
+import sys # For print to stderr
+from string import Template
+import openai # Added
+from openai import APIError # Added
+
 from .context import ExecutionContext
-from .exceptions import PILSemanticError, PILSyntaxError
+from .exceptions import PILSemanticError, PILSyntaxError, PILError
+
+DEFAULT_MODEL = "gpt-3.5-turbo"
 
 class Evaluator:
-    def __init__(self, pil_program_data: dict, context: ExecutionContext):
+    # __init__ will be refactored in the next step to accept openai_client
+    def __init__(self, pil_program_data: dict, context: ExecutionContext, openai_client: openai.OpenAI | None = None):
         if not isinstance(pil_program_data, dict):
             raise PILSyntaxError("PIL program data must be a dictionary.")
         if not isinstance(context, ExecutionContext):
             raise TypeError("Context must be an instance of ExecutionContext.")
+        if openai_client is not None and not isinstance(openai_client, openai.OpenAI):
+            raise TypeError("openai_client must be an instance of openai.OpenAI or None.")
 
         self.program_data = pil_program_data
         self.context = context
+        self.openai_client = openai_client # Will be set by main.py
 
-        # Populate context with initial data from PIL program
         if "config" in self.program_data and isinstance(self.program_data["config"], dict):
             self.context.set_global_parameters(self.program_data["config"].get("parameters", {}))
+            # Store model from config directly in context as well for easier access
+            if "model" in self.program_data["config"]:
+                 self.context.global_parameters["model"] = self.program_data["config"]["model"]
 
         if "persona" in self.program_data and isinstance(self.program_data["persona"], dict):
             self.context.set_persona(self.program_data["persona"])
 
-        # Inputs are typically loaded into context by the CLI or calling environment
-        # We could add validation here against an 'input' block in PIL if needed
-        # e.g., ensure all declared inputs in PIL file are present in context.
-
     def _substitute_variables(self, text: str) -> str:
-        """
-        Substitutes ${variable} or $variable patterns in text with values from context.
-        More complex templating (like Jinja2) would replace this.
-        """
         if not isinstance(text, str):
-            return text # Or raise error
-
-        # Simple $variable or ${variable} substitution using string.Template
-        # For more complex cases (attributes, filters), Jinja2 would be better.
-        # This regex finds ${var} or $var patterns.
-        # It's a bit more robust than plain Template for missing vars if we want to keep them.
-
-        # First, create a mapping for Template, handling missing keys gracefully
-        # by returning the original placeholder if a variable is not found.
-        class SafeDict(dict):
-            def __missing__(self, key):
-                return '${' + key + '}' # or '$' + key if you prefer
-
-        template_vars = SafeDict(self.context.variables)
-
-        # Attempt substitution using string.Template
-        # This handles ${var} and $var (if $var is not followed by another letter/number)
-        try:
-            # Replace ${var} with $var for Template compatibility if needed,
-            # or use a regex to find all ${var} and $var.
-            # For simplicity, let's assume Template handles ${var} correctly if var is simple.
-            # A more robust approach involves regex:
-            def replace_match(match):
-                var_name = match.group(1) or match.group(2)
-                return str(self.context.get_variable(var_name, match.group(0)))
-
-            # Regex to find $variable or ${variable}
-            # It captures the variable name without the $ or ${}
-            text = re.sub(r'\$(?:([a-zA-Z_][a-zA-Z0-9_]*)|{([a-zA-Z_][a-zA-Z0-9_]*)})', replace_match, text)
             return text
 
+        def replace_match(match):
+            var_name = match.group(1) or match.group(2)
+            return str(self.context.get_variable(var_name, match.group(0)))
+        try:
+            text = re.sub(r'\$(?:([a-zA-Z_][a-zA-Z0-9_]*)|{([a-zA-Z_][a-zA-Z0-9_]*)})', replace_match, text)
+            return text
         except Exception as e:
-            # Fallback or error for complex cases not handled by simple substitution
-            # print(f"Warning: Variable substitution failed for text: '{text[:50]}...'. Error: {e}", file=sys.stderr)
-            return text # Return original text if substitution fails badly
-
+            print(f"Warning: Variable substitution failed. Error: {e}", file=sys.stderr)
+            return text
 
     def _handle_prompt_step(self, step_config: dict):
         if not isinstance(step_config, dict):
@@ -76,28 +55,64 @@ class Evaluator:
             raise PILSemanticError("Prompt step must have a 'text' field as a string.")
 
         output_var_name = step_config.get("def")
-        # examples = step_config.get("examples") # Handle later
+        # examples = step_config.get("examples") # TODO: Handle few-shot examples
 
-        # Substitute variables in the prompt text
         substituted_prompt_text = self._substitute_variables(prompt_text)
-
         print(f"    Substituted Prompt: \"{substituted_prompt_text[:100]}{'...' if len(substituted_prompt_text)>100 else ''}\"")
 
-        # Simulate LLM call
-        # TODO: Actual LLM call will be implemented here
-        mocked_response = f"Mocked LLM Response to: \"{substituted_prompt_text[:50]}...\""
-        print(f"    Mocked LLM Response: \"{mocked_response}\"")
+        llm_response_content = ""
 
-        # Store response in context if 'def' is specified
+        if not self.openai_client:
+            print("    Warning: OpenAI client not available. Using mocked LLM response.", file=sys.stderr)
+            llm_response_content = f"Mocked LLM Response to: \"{substituted_prompt_text[:50]}...\""
+        else:
+            messages = []
+            persona = self.context.get_persona()
+            if persona and persona.get("role"): # Using 'role' from persona as system message content
+                messages.append({"role": "system", "content": persona.get("role")})
+
+            history = self.context.get_history()
+            messages.extend(history) # History should already be in {"role": ..., "content": ...} format
+
+            messages.append({"role": "user", "content": substituted_prompt_text})
+
+            model_name = self.context.get_global_parameters().get("model", DEFAULT_MODEL)
+            # Other parameters like temperature can be fetched from context.global_parameters
+            temperature = self.context.get_global_parameters().get("temperature", 0.7) # Default if not set
+
+            print(f"    Making LLM call to model: {model_name} with temperature: {temperature}...")
+            try:
+                api_response = self.openai_client.chat.completions.create(
+                    model=model_name,
+                    messages=messages, # type: ignore # Pyright complains about list[dict[str,str]] vs MessagesParam
+                    temperature=float(temperature) # Ensure temperature is float
+                    # TODO: Add other parameters like max_tokens, top_p from context
+                )
+                llm_response_content = api_response.choices[0].message.content or ""
+                print(f"    LLM Response: \"{llm_response_content[:100]}{'...' if len(llm_response_content)>100 else ''}\"")
+            except APIError as e:
+                error_message = f"OpenAI API Error: {e}"
+                print(f"    {error_message}", file=sys.stderr)
+                # Option 1: Raise an error and stop execution
+                # raise PILError(error_message)
+                # Option 2: Store error message as response and continue (might be useful for some flows)
+                llm_response_content = f"ERROR: {error_message}"
+                # Option 3: Fallback to mocked response (less ideal for real use)
+                # llm_response_content = f"Mocked LLM Response due to API Error for: \"{substituted_prompt_text[:50]}...\""
+            except Exception as e: # Catch other unexpected errors during API call
+                error_message = f"Unexpected error during LLM call: {e}"
+                print(f"    {error_message}", file=sys.stderr)
+                llm_response_content = f"ERROR: {error_message}"
+
+
         if output_var_name:
             if not isinstance(output_var_name, str):
                 raise PILSemanticError("Prompt step 'def' field must be a string (variable name).")
-            self.context.set_variable(output_var_name, mocked_response)
+            self.context.set_variable(output_var_name, llm_response_content)
             print(f"    Stored response in context variable: '{output_var_name}'")
 
-        # Add to conversation history
         self.context.add_history_entry(role="user", content=substituted_prompt_text)
-        self.context.add_history_entry(role="assistant", content=mocked_response)
+        self.context.add_history_entry(role="assistant", content=llm_response_content) # Store actual or error response
         print(f"    Added user prompt and assistant response to history.")
 
 
@@ -109,7 +124,7 @@ class Evaluator:
 
         steps = self.program_data["workflow"].get("steps")
         if not steps:
-            print("Warning: Workflow has no steps.")
+            print("Warning: Workflow has no steps.", file=sys.stderr)
             return
         if not isinstance(steps, list):
             raise PILSyntaxError("'steps' in workflow must be a list.")
@@ -117,26 +132,22 @@ class Evaluator:
         print("Starting PIL workflow execution...")
         for i, step_data in enumerate(steps):
             if not isinstance(step_data, dict) or len(step_data) != 1:
-                # Each step should be a dictionary with a single key defining its type
                 raise PILSemanticError(f"Step {i+1} in workflow is not a valid dictionary with a single type key. Found: {step_data}")
 
             step_type = list(step_data.keys())[0]
-            step_config = step_data[step_type] # This is the dictionary of parameters for the step
+            step_config = step_data[step_type]
 
             print(f"\nProcessing Step {i+1} (Type: {step_type}):")
 
             if step_type == "prompt":
                 self._handle_prompt_step(step_config)
             elif step_type == "tool":
-                print(f"  Content: {step_config}") # Placeholder
-                # self._handle_tool_step(step_config)
+                print(f"  Tool step found. Config: {step_config}") # Placeholder
             elif step_type == "code":
-                print(f"  Content: {step_config}") # Placeholder
-                # self._handle_code_step(step_config)
+                print(f"  Code step found. Config: {step_config}") # Placeholder
             elif step_type == "retrieve":
-                print(f"  Content: {step_config}") # Placeholder
-                # self._handle_retrieve_step(step_config)
+                print(f"  Retrieve step found. Config: {step_config}") # Placeholder
             else:
-                print(f"  Warning: Unknown step type '{step_type}' at step {i+1}. Content: {step_config}")
+                print(f"  Warning: Unknown step type '{step_type}' at step {i+1}. Content: {step_config}", file=sys.stderr)
 
         print("\nPIL workflow execution finished.")
