@@ -1,8 +1,7 @@
-import re
 import sys # For print to stderr
-from string import Template
-import openai # Added
-from openai import APIError # Added
+import openai
+from openai import APIError
+import jinja2 # Added
 
 from .context import ExecutionContext
 from .exceptions import PILSemanticError, PILSyntaxError, PILError
@@ -10,7 +9,6 @@ from .exceptions import PILSemanticError, PILSyntaxError, PILError
 DEFAULT_MODEL = "gpt-3.5-turbo"
 
 class Evaluator:
-    # __init__ will be refactored in the next step to accept openai_client
     def __init__(self, pil_program_data: dict, context: ExecutionContext, openai_client: openai.OpenAI | None = None):
         if not isinstance(pil_program_data, dict):
             raise PILSyntaxError("PIL program data must be a dictionary.")
@@ -21,11 +19,17 @@ class Evaluator:
 
         self.program_data = pil_program_data
         self.context = context
-        self.openai_client = openai_client # Will be set by main.py
+        self.openai_client = openai_client
+
+        # Initialize Jinja2 environment
+        self.jinja_env = jinja2.Environment(
+            loader=jinja2.BaseLoader(), # We're loading templates from strings, not files
+            undefined=jinja2.Undefined # Default behavior: undefined variables render as empty strings
+            # For stricter undefined variable handling, use: undefined=jinja2.StrictUndefined
+        )
 
         if "config" in self.program_data and isinstance(self.program_data["config"], dict):
             self.context.set_global_parameters(self.program_data["config"].get("parameters", {}))
-            # Store model from config directly in context as well for easier access
             if "model" in self.program_data["config"]:
                  self.context.global_parameters["model"] = self.program_data["config"]["model"]
 
@@ -34,16 +38,22 @@ class Evaluator:
 
     def _substitute_variables(self, text: str) -> str:
         if not isinstance(text, str):
-            return text
+            return text # Or raise a TypeError if strict typing is preferred for text inputs
 
-        def replace_match(match):
-            var_name = match.group(1) or match.group(2)
-            return str(self.context.get_variable(var_name, match.group(0)))
         try:
-            text = re.sub(r'\$(?:([a-zA-Z_][a-zA-Z0-9_]*)|{([a-zA-Z_][a-zA-Z0-9_]*)})', replace_match, text)
+            template = self.jinja_env.from_string(text)
+            # Provide all context variables to the template
+            rendered_text = template.render(self.context.variables)
+            return rendered_text
+        except jinja2.exceptions.TemplateSyntaxError as e:
+            # Handle cases where the text itself might have Jinja2 syntax errors
+            # For example, an unclosed {{ or an invalid filter.
+            print(f"Warning: Jinja2 syntax error during variable substitution: {e}", file=sys.stderr)
+            # Fallback: return original text or raise a specific PIL error
             return text
         except Exception as e:
-            print(f"Warning: Variable substitution failed. Error: {e}", file=sys.stderr)
+            # Catch other potential rendering errors
+            print(f"Warning: Unexpected error during Jinja2 variable substitution: {e}", file=sys.stderr)
             return text
 
     def _handle_prompt_step(self, step_config: dict):

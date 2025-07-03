@@ -1,5 +1,6 @@
 import unittest
 from unittest.mock import MagicMock, patch, ANY
+from io import StringIO # Added
 import openai # For APIError and mocking client
 from openai.types.chat import ChatCompletionMessage, ChatCompletion
 from openai.types.chat.chat_completion import Choice
@@ -87,7 +88,7 @@ class TestEvaluator(unittest.TestCase):
             "workflow": {
                 "steps": [{
                     "prompt": {
-                        "text": "Hello ${name}, how are you?",
+                        "text": "Hello {{ name }}, how are you?",
                         "def": "ai_response"
                     }
                 }]
@@ -121,7 +122,7 @@ class TestEvaluator(unittest.TestCase):
         context.set_variable("item", "widget")
         program_data = {
             "workflow": {
-                "steps": [{"prompt": {"text": "Info on $item", "def": "info_out"}}]
+                "steps": [{"prompt": {"text": "Info on {{ item }}", "def": "info_out"}}]
             }
         }
         evaluator = Evaluator(program_data, context, openai_client=None) # NO client
@@ -141,7 +142,7 @@ class TestEvaluator(unittest.TestCase):
         program_data = {
              "config": {"model": "gpt-error-model"},
             "workflow": {
-                "steps": [{"prompt": {"text": "Process $query", "def": "error_output"}}]
+                "steps": [{"prompt": {"text": "Process {{ query }}", "def": "error_output"}}]
             }
         }
         evaluator = Evaluator(program_data, context, openai_client=self.mock_openai_client)
@@ -201,21 +202,45 @@ class TestEvaluator(unittest.TestCase):
         context.set_variable("action", "runs")
         context.set_variable("obj_count", 5)
 
-        text = "My name is ${name}."
+        text = "My name is {{ name }}." # Corrected this line
         self.assertEqual(evaluator._substitute_variables(text), "My name is Alice.")
-        # ... (rest of substitute_variables assertions) ...
-        text = "$name $action fast."
+
+        text = "{{ name }} {{ action }} fast."
         self.assertEqual(evaluator._substitute_variables(text), "Alice runs fast.")
-        text = "There are ${obj_count} items."
+
+        text = "There are {{ obj_count }} items."
         self.assertEqual(evaluator._substitute_variables(text), "There are 5 items.")
-        text = "Undefined var: ${undefined_var} or $another_undefined."
-        self.assertEqual(evaluator._substitute_variables(text), "Undefined var: ${undefined_var} or $another_undefined.")
+
+        # Jinja2 renders undefined variables as empty strings by default
+        text = "Undefined var: {{ undefined_var }} or {{ another_undefined }}."
+        self.assertEqual(evaluator._substitute_variables(text), "Undefined var:  or .")
+
         text = "No variables here."
         self.assertEqual(evaluator._substitute_variables(text), "No variables here.")
-        text = "${name} has ${obj_count} ${item_type_undefined}."
-        self.assertEqual(evaluator._substitute_variables(text), "Alice has 5 ${item_type_undefined}.")
-        text = "This is $name's test. Not ${name}s."
-        self.assertEqual(evaluator._substitute_variables(text), "This is Alice's test. Not Alices.")
+
+        text = "{{ name }} has {{ obj_count }} {{ item_type_undefined }}."
+        self.assertEqual(evaluator._substitute_variables(text), "Alice has 5 .")
+
+        # Test dictionary access
+        context.set_variable("my_dict", {"key": "value", "count": 10})
+        text = "Dict value: {{ my_dict.key }}, count: {{ my_dict.count }}."
+        self.assertEqual(evaluator._substitute_variables(text), "Dict value: value, count: 10.")
+        text = "Non-existent key: {{ my_dict.non_existent_key }}." # Renders empty
+        self.assertEqual(evaluator._substitute_variables(text), "Non-existent key: .")
+
+        # Test with default filter (though not explicitly enabling many filters yet)
+        # Jinja2's default env doesn't have many filters, but `default` is usually available via `jinja2.defaults.DEFAULT_FILTERS`
+        # For this test, we'll rely on the basic undefined behavior.
+        # A more explicit test for filters would require adding them to the environment.
+        # text = "Value or default: {{ undefined_var | default('fallback') }}."
+        # self.assertEqual(evaluator._substitute_variables(text), "Value or default: fallback.")
+
+        # Test syntax error in template string
+        text = "This has an {% invalid jinja syntax %}"
+        with patch('sys.stderr', new_callable=StringIO) as mock_stderr: # Corrected here
+            self.assertEqual(evaluator._substitute_variables(text), text) # Should return original on syntax error
+            self.assertIn("Jinja2 syntax error", mock_stderr.getvalue())
+
 
     @patch('builtins.print')
     def test_run_workflow_unknown_step_type(self, mock_print):
