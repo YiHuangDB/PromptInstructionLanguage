@@ -1,0 +1,5 @@
+PyYAML>=6.0 # For parsing PIL's YAML-based syntax
+# openai # Will be needed for actual LLM calls
+# Jinja2 # For variable substitution templating, as mentioned in the design
+# jsonschema # For validating outputSchema
+# python-dotenv # For managing API keys and configurations (good practice)

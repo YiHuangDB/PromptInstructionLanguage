@@ -1,0 +1,64 @@
+# PIL Program: RAG-based Question Answering Agent (Simplified Example)
+
+config:
+  model: openai/gpt-4o-mini
+  parameters:
+    temperature: 0.1
+
+persona:
+  role: >
+    You are a knowledgeable and helpful AI assistant.
+    Your task is to accurately answer user questions based on provided context.
+  style: clear, concise
+  tone: professional
+
+input:
+  vars:
+    question: string
+
+# outputSchema:
+#   schema:
+#     type: object
+#     properties:
+#       answer:
+#         type: string
+#         description: "Direct answer to the user's question."
+#       source_snippets:
+#         type: array
+#         items:
+#           type: string
+#         description: "Context snippets used to generate the answer."
+#     required: ["answer"]
+
+workflow:
+  steps:
+    - retrieve:
+        from: "internal_knowledge_base_placeholder" # Placeholder, actual source TBD
+        query: "${question}"
+        k: 3
+        def: "retrieved_context" # This will be a list of strings or dicts
+
+    - prompt:
+        text: |
+          Context:
+          """
+          ${retrieved_context} # Simplified for now, will need proper joining/formatting
+          """
+
+          Based on the above context, answer the following question: ${question}
+        def: "final_answer"
+        # constraints:
+        #   custom_validator: "validators.py:check_answer_groundedness" # Example
+
+    # - code: # Example of a code step to format output
+    #     lang: python
+    #     script: |
+    #       result = {
+    #           "answer": final_answer,
+    #           "source_snippets": [doc for doc in retrieved_context] # Assuming retrieved_context is list of strings
+    #       }
+    #     def: "output_object"
+
+# This is a simplified example.
+# Full features like outputSchema, complex data handling in templates,
+# and validators will be implemented progressively.
