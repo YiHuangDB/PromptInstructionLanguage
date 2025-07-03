@@ -4,6 +4,7 @@ from typing import Dict, Any, Callable
 from pil_engine.interpreter import Interpreter, PilParser
 from pil_engine.core.components import PilProgram, ToolStep
 from pil_engine.core.context import Context
+from pil_engine.exceptions import ToolExecutionError # Import the exception
 
 # --- Sample Tools for Testing ---
 def add_tool(a: Any, b: Any) -> float:
@@ -110,8 +111,8 @@ class TestInterpreterToolStep(unittest.TestCase):
         self.interpreter.pil_program = program
         self.interpreter.context = Context()
 
-        # The interpreter's _execute_tool_step catches TypeError from tool and re-raises it
-        with self.assertRaisesRegex(TypeError, "Error calling tool 'add_numbers'"):
+        # The interpreter's _execute_tool_step catches and wraps exceptions in ToolExecutionError
+        with self.assertRaisesRegex(ToolExecutionError, "Type error while calling tool 'add_numbers' with args {'a': 'five', 'b': 3}: Both 'a' and 'b' must be convertible to numbers for add_tool."):
             self.interpreter.run()
 
     def test_tool_raises_custom_exception(self):
@@ -119,8 +120,8 @@ class TestInterpreterToolStep(unittest.TestCase):
         self.interpreter.pil_program = program
         self.interpreter.context = Context()
 
-        # The interpreter's _execute_tool_step wraps other exceptions in RuntimeError
-        with self.assertRaisesRegex(RuntimeError, "Tool 'failing_tool' raised an exception: This tool intentionally failed."):
+        # The interpreter's _execute_tool_step wraps other exceptions in ToolExecutionError
+        with self.assertRaisesRegex(ToolExecutionError, "Tool 'failing_tool' raised an exception: This tool intentionally failed."):
             self.interpreter.run()
 
     def test_tool_output_is_correctly_defined(self):

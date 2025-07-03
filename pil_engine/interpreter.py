@@ -548,6 +548,24 @@ class Interpreter:
                 error_msg = f"Invalid OutputSchema provided in PIL program: {e.message}"
                 self._add_trace_log("OUTPUT_SCHEMA_INVALID", error=error_msg, details=str(e))
                 raise InvalidSchemaError(error_msg, schema_error=e) from e
+
+        if self.pil_program.constraints:
+            self._add_trace_log("PROGRAM_CONSTRAINTS_VALIDATION_START", constraints=str(self.pil_program.constraints), output_to_validate=str(final_output))
+            print(f"Interpreter: Applying program-level constraints...")
+            try:
+                final_output = apply_constraints( # Re-assign final_output
+                    value=final_output,
+                    constraints=self.pil_program.constraints,
+                    context=self.context, # Pass current context
+                    step_name="PilProgram (Top-Level Constraints)"
+                )
+                self._add_trace_log("PROGRAM_CONSTRAINTS_VALIDATION_SUCCESS", validated_output=str(final_output))
+                print("Interpreter: Program-level constraints validation successful.")
+            except ConstraintViolationError as cve:
+                self._add_trace_log("PROGRAM_CONSTRAINTS_VALIDATION_FAILED", error=str(cve))
+                print(f"Interpreter: Program-level constraints validation failed: {cve}")
+                raise # Re-raise the original ConstraintViolationError
+
         print("Interpreter: PIL program execution finished.")
         if self.debug_mode:
             print("\n--- DEBUG TRACE LOG ---")

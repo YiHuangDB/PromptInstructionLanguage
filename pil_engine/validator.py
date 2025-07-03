@@ -70,35 +70,45 @@ def apply_constraints(
                 violation = True
                 error_detail = f"Expected type 'boolean', got {type(value).__name__}."
         elif constraint_type_str == "list" or constraint_type_str == "array":
-            if isinstance(value, str): # Expect JSON string from LLM
+            # print(f"DEBUG: Validating type list/array. Input value: '{value}' (type: {type(value)})")
+            if isinstance(value, str):
                 try:
                     parsed_value = json.loads(value)
+                    # print(f"DEBUG: Parsed JSON string: '{parsed_value}' (type: {type(parsed_value)})")
                     if not isinstance(parsed_value, list):
                         violation = True
                         error_detail = f"Value parsed from JSON string is not a list (got {type(parsed_value).__name__})."
                     else:
-                        value = parsed_value
+                        value = parsed_value # Update value to the parsed list
+                        # print(f"DEBUG: Value updated to list: {value}")
                 except json.JSONDecodeError:
                     violation = True
                     error_detail = f"Value is not a valid JSON string for type 'list/array'."
-            elif not isinstance(value, list): # If it's already a list (e.g. from CodeStep), it's fine.
+            elif not isinstance(value, list):
                 violation = True
                 error_detail = f"Expected type 'list/array' or JSON string representing one, got {type(value).__name__}."
+            # else:
+                # print(f"DEBUG: Value is already a list: {value}")
         elif constraint_type_str == "object":
-            if isinstance(value, str): # Expect JSON string from LLM
+            # print(f"DEBUG: Validating type object. Input value: '{value}' (type: {type(value)})")
+            if isinstance(value, str):
                 try:
                     parsed_value = json.loads(value)
+                    # print(f"DEBUG: Parsed JSON string: '{parsed_value}' (type: {type(parsed_value)})")
                     if not isinstance(parsed_value, dict):
                         violation = True
                         error_detail = f"Value parsed from JSON string is not an object/dict (got {type(parsed_value).__name__})."
                     else:
-                        value = parsed_value
+                        value = parsed_value # Update value to the parsed dict
+                        # print(f"DEBUG: Value updated to dict: {value}")
                 except json.JSONDecodeError:
                     violation = True
                     error_detail = f"Value is not a valid JSON string for type 'object'."
-            elif not isinstance(value, dict): # If it's already a dict
+            elif not isinstance(value, dict):
                 violation = True
                 error_detail = f"Expected type 'object' or JSON string representing one, got {type(value).__name__}."
+            # else:
+                # print(f"DEBUG: Value is already a dict: {value}")
         else:
             # Unknown type constraint, could warn or error. For now, let's be strict.
             raise PilEngineError(f"Unknown constraint type '{constraints.type}' specified in step '{step_name}'.")
