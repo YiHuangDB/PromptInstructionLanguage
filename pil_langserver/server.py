@@ -16,12 +16,17 @@ from pygls.lsp.types import (
     Position,
     Range as LspRange,
     CompletionOptions, # Added
-    CompletionParams,  # Added
-    CompletionList,    # Added
-    CompletionItem,    # Added
-    CompletionItemKind # Added
+    CompletionParams,
+    CompletionList,
+    CompletionItem,
+    CompletionItemKind,
+    Hover,             # Added
+    HoverParams,       # Added
+    MarkupContent,     # Added
+    MarkupKind         # Added
 )
 import yaml
+import re # Added for word extraction in hover/completion
 from pil_engine.interpreter import PilParser
 from pil_engine.exceptions import PilEngineError # For catching general PIL errors
 
@@ -106,9 +111,10 @@ async def initialize(ls: PilLanguageServer, params: InitializeParams):
         ),
         completion_provider=CompletionOptions(
             trigger_characters=[':', ' ', '-', '{'],
-            # resolve_provider=False # We can set to True if we want to provide more details on item selection
-        )
-        # Future capabilities (hover, definition) will be added here
+            # resolve_provider=False
+        ),
+        hover_provider=True # Enabled hover provider
+        # Future capabilities (definition) will be added here
     )
     logger.info(f"Server capabilities: {server_capabilities}")
     return InitializeResult(capabilities=server_capabilities)
@@ -437,6 +443,166 @@ def main():
     #     loop.close()
 
     logger.info("PIL Language Server stopped.")
+
+# --- Hover Handler (Initial Stub) ---
+@pil_server.feature("textDocument/hover")
+async def hover(ls: PilLanguageServer, params: HoverParams) -> Optional[Hover]:
+    doc_uri = params.text_document.uri
+    position = params.position
+    logger.info(f"Hover requested for {doc_uri} at {position}")
+
+    # TODO:
+    # 1. Get document from workspace.
+    # 2. Identify the word/token under the cursor at params.position.
+    # 1. Get document from workspace.
+    document = ls.workspace.get_document(doc_uri)
+    if not document:
+        logger.warning(f"Hover: Could not get document {doc_uri}")
+        return None
+
+    # 2. Identify the word/token under the cursor at params.position.
+    current_line_num = params.position.line
+    cursor_char_num = params.position.character
+
+    if not (0 <= current_line_num < len(document.lines)):
+        logger.warning(f"Hover: Invalid line number {current_line_num}")
+        return None
+
+    line_text = document.lines[current_line_num]
+
+    # Iterate backwards from cursor to find start of word
+    start_char = cursor_char_num
+    # Allow alphanumeric, underscore, and hyphen (common in YAML keys)
+    while start_char > 0 and (line_text[start_char - 1].isalnum() or line_text[start_char - 1] in ['_', '-']):
+        start_char -= 1
+
+    # Iterate forwards from original cursor position to find end of word
+    end_char = cursor_char_num
+    while end_char < len(line_text) and (line_text[end_char].isalnum() or line_text[end_char] in ['_', '-']):
+        end_char += 1
+
+    hovered_word = line_text[start_char:end_char].strip()
+
+    # Handle cases where the cursor might be on punctuation like ':', or part of '{{' '}}'
+    if not hovered_word:
+        if cursor_char_num > 0 and line_text[cursor_char_num - 1] == ':':
+            # If on ':', try to get the key to its left
+            temp_start = cursor_char_num - 1
+            while temp_start > 0 and (line_text[temp_start - 1].isalnum() or line_text[temp_start - 1] in ['_', '-']):
+                temp_start -= 1
+            hovered_word = line_text[temp_start:cursor_char_num - 1].strip()
+            logger.info(f"Hover identified key before colon: '{hovered_word}' (cursor was on colon)")
+        elif cursor_char_num > 1 and line_text[cursor_char_num-2:cursor_char_num] == '{{':
+            hovered_word = '{{'
+        elif cursor_char_num < len(line_text) and line_text[cursor_char_num:cursor_char_num+1] == '{' and \
+             cursor_char_num > 0 and line_text[cursor_char_num-1:cursor_char_num] == '{': # Cursor is on the second { of {{
+            hovered_word = '{{'
+        elif cursor_char_num < len(line_text) and line_text[cursor_char_num:cursor_char_num+1] == '}' and \
+             cursor_char_num > 0 and line_text[cursor_char_num-1:cursor_char_num] == '}': # Cursor is on the second } of }}
+            hovered_word = '}}'
+        elif cursor_char_num < len(line_text) -1 and line_text[cursor_char_num:cursor_char_num+2] == '}}':
+             hovered_word = '}}'
+
+
+    logger.info(f"Hover context: Line='{line_text.strip()}', Position=({current_line_num}, {cursor_char_num}), Word='{hovered_word}'")
+
+    # 3. Fetch documentation/information based on the token. (Step 4)
+    # 4. Format and return Hover object. (Step 4)
+
+    # For now, this step is about identifying the word.
+    # Step 4 will use 'hovered_word' to generate the Hover object.
+    # 3. Fetch documentation/information based on the token.
+    # 4. Format and return Hover object.
+    documentation = HOVER_DOCUMENTATION.get(hovered_word)
+
+    if documentation:
+        markup_content = MarkupContent(kind=MarkupKind.Markdown, value=documentation)
+        # Determine the range of the hovered word for more precise hover highlighting
+        # This can be tricky if the word extraction isn't perfect or if it's part of a larger token
+        # For now, use the extracted word's boundaries.
+        hover_range = LspRange(start=Position(line=current_line_num, character=start_char),
+                               end=Position(line=current_line_num, character=end_char))
+
+        return Hover(contents=markup_content, range=hover_range)
+
+    return None
+
+
+# --- Hover Information Dictionary ---
+HOVER_DOCUMENTATION = {
+    # Top Level
+    "config": "Global configuration for the PIL program (e.g., LLM model, API keys, parameters).",
+    "persona": "Defines the role, style, and tone the LLM should adopt.",
+    "input": "Declares input variables and their expected types for the program.",
+    "outputSchema": "Defines the JSON Schema for the final program output.",
+    "workflow": "The main block containing a sequence of executable steps.",
+    # "constraints" (top-level) is covered by the generic constraints key below
+
+    # Step Types
+    "prompt": "A step to interact with an LLM by sending a prompt and receiving a response.",
+    "retrieve": "A step to retrieve relevant data from a knowledge source (e.g., RAG).",
+    "tool": "A step to execute a predefined Python tool/function.",
+    "code": "A step to execute a block of Python code in a sandboxed environment.",
+    "if": "A control flow step for conditional execution of branches (`then`, `else`). Also the key for the condition expression itself.",
+    "for": "A control flow step for iterating over a collection or a range. Also the key for the loop expression.",
+    "while": "A control flow step for executing a block of steps while a condition is true. Also the key for the condition expression.",
+    "loop": "Alias for a `while` loop; executes steps while a condition is true. Also the key for the condition expression.",
+
+    # Common Parameters
+    "def": "Defines a variable name to store the output of this step in the context.",
+    "steps": "A list of steps to be executed, typically within `workflow`, `if`, or `loop` blocks.",
+
+    # PromptStep Specific
+    "text": "The main prompt text for an LLM (supports {{templating}}).",
+    "examples": "A list of input/output examples for few-shot prompting.",
+    "max_retries": "Maximum self-correction retries if prompt constraints fail (default: 0).",
+
+    # RetrieveStep Specific
+    "from": "Specifies the source of the knowledge base (e.g., file path to JSON).",
+    "query": "The query string for retrieval (supports {{templating}}).",
+    "k": "The maximum number of documents to retrieve (default: 3).",
+
+    # ToolStep Specific
+    "name": "The registered name of the tool to execute OR the name of an input variable.", # Used in multiple contexts
+    "args": "A dictionary of arguments to pass to the tool.",
+
+    # CodeStep Specific
+    "lang": "The language of the script (currently only 'python').",
+    "script": "The block of code to execute.",
+
+    # IfStep Specific
+    "then": "Block of steps to execute if the 'if' condition is true.",
+    "else": "Block of steps to execute if the 'if' condition is false.",
+
+    # Constraints Object Keys (can be top-level or under a step)
+    "constraints": "Defines validation rules for an output (e.g., type, regex, choices, custom_validator).",
+    "type": "Specifies the expected data type (e.g., string, integer, boolean). Can perform coercion.",
+    "regex": "A Python regular expression pattern that the value must match.",
+    "choices": "A list of allowed values.",
+    "custom_validator": "Path to a custom Python validator function (e.g., 'module:function').",
+
+    # Config Specific
+    "model": "Identifier of the LLM to be used (e.g., 'gpt-4o-mini').",
+    "api_key": "API key for the LLM service (environment variable preferred).",
+    "parameters": "Dictionary of parameters for LLM calls (e.g., temperature).",
+
+    # Persona Specific
+    "role": "The primary role the LLM should adopt.",
+    "style": "The writing or communication style for the LLM.",
+    "tone": "The emotional tone for the LLM's responses.",
+    "audience": "The intended audience for the LLM's responses.",
+
+    # Input Specific
+    "vars": "Defines input variables for the program (name, type, description).",
+
+    # OutputSchema Specific
+    "schema": "A JSON Schema object defining the output structure.",
+
+    # Template braces
+    "{{": "Start of a PIL template expression. Evaluates to a context variable.",
+    "}}": "End of a PIL template expression."
+}
+
 
 if __name__ == "__main__":
     main()
