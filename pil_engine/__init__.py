@@ -5,6 +5,11 @@ from .core import (
 )
 from .interpreter import Interpreter
 from .utils import render_template_string, safe_eval_code_string
+from dotenv import load_dotenv
+
+# Load .env file if present at the time the library is imported.
+# This allows users to manage API keys etc. in a .env file for development.
+load_dotenv()
 
 __all__ = [
     # From core

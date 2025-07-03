@@ -8,6 +8,9 @@ from .core.components import (
 from .core.context import Context
 from .utils import render_template_string, safe_eval_code_string
 
+import os
+import openai # Added for actual LLM client
+
 # --- Conceptual Debugging Strategy Notes for Interpreter ---
 # (Already detailed in previous step, summarized here for context)
 # 1. Trace-Based Debugging: Implemented with `debug_mode` and `trace_log`.
@@ -15,6 +18,10 @@ from .utils import render_template_string, safe_eval_code_string
 # 3. Unit Testing: Best practice, to be implemented with pytest and test PIL files.
 # --- End Conceptual Debugging Notes ---
 
+# It's good practice to load dotenv at the earliest point possible if used.
+# from dotenv import load_dotenv
+# load_dotenv() # This would typically be in the main entry point of an application using this library.
+# For the library itself, we assume environment variables are already loaded or set.
 
 class PilParser:
     """
@@ -100,10 +107,14 @@ class Interpreter:
             raise TypeError("pil_program must be an instance of PilProgram.")
         self.pil_program: PilProgram = pil_program
         self.context: Context = Context(initial_vars=initial_vars)
-        self.llm_client: Any = None # Placeholder for actual LLM client instance
+        self.llm_client: Any = None
         self.debug_mode: bool = debug_mode
-        self.trace_log: List[Dict[str, Any]] = [] if self.debug_mode else None # Stores trace logs if debug_mode is True
+        self.trace_log: List[Dict[str, Any]] = [] if self.debug_mode else None
 
+        # LLM client initialization is now more involved and might depend on API keys loaded via dotenv,
+        # so it's better to call it as part of the run, or ensure dotenv is loaded before Interpreter instantiation.
+        # For now, let's keep it here but be mindful of when API keys become available.
+        # We'll also need to import 'os' and 'openai'.
         self._initialize_llm_client()
 
     def _add_trace_log(self, event_type: str, **kwargs):
@@ -118,19 +129,42 @@ class Interpreter:
 
     def _initialize_llm_client(self):
         """
-        (Placeholder) Initializes the LLM client based on PIL program's config.
-        Currently simulates client creation.
+        Initializes the LLM client based on the PIL program's config and environment variables.
+        Prioritizes API key from `config.api_key`, then environment variable `OPENAI_API_KEY`.
         """
-        if self.pil_program.config and self.pil_program.config.model:
-            # In a real implementation, this would instantiate an actual LLM client, e.g.:
-            # from some_llm_library import LLMClient
-            # self.llm_client = LLMClient(model=self.pil_program.config.model, api_key=self.pil_program.config.api_key, **self.pil_program.config.parameters)
-            self.llm_client = f"SimulatedLLMClient(model={self.pil_program.config.model}, params={self.pil_program.config.parameters})"
-            self._add_trace_log("LLM_CLIENT_INIT", client_info=self.llm_client)
-            print(f"Interpreter: LLM Client Initialized: {self.llm_client}")
-        else:
-            self._add_trace_log("LLM_CLIENT_INIT", status="No config or model specified in PIL, LLM client not initialized.")
-            print("Interpreter: No LLM configuration provided, or model not specified. LLM client not initialized.")
+        config = self.pil_program.config
+        model_name = config.model if config else None
+        api_key_from_config = config.api_key if config else None
+
+        if not model_name:
+            self._add_trace_log("LLM_CLIENT_INIT_SKIPPED", reason="No model specified in PIL config.")
+            print("Interpreter: LLM client not initialized: No model specified in PIL program config.")
+            self.llm_client = None
+            return
+
+        # For now, assuming all models are OpenAI compatible if a model is specified.
+        # Future: Add logic to determine client type based on model_name or a provider field.
+
+        api_key = api_key_from_config or os.environ.get("OPENAI_API_KEY")
+
+        if not api_key:
+            self._add_trace_log("LLM_CLIENT_INIT_FAILED", model=model_name, reason="API key not found in config or environment (OPENAI_API_KEY).")
+            print(f"Interpreter: LLM client for model '{model_name}' not initialized: API key missing.")
+            self.llm_client = None # Explicitly set to None, indicating no client.
+            return
+
+        try:
+            self.llm_client = openai.OpenAI(api_key=api_key)
+            # We might want to add a check here to see if the client is functional,
+            # e.g., by listing models, but that's an actual API call.
+            # For now, instantiation is enough for this step.
+            self._add_trace_log("LLM_CLIENT_INIT_SUCCESS", model=model_name, client_type="OpenAI")
+            print(f"Interpreter: OpenAI LLM Client Initialized for model '{model_name}'.")
+        except Exception as e:
+            self.llm_client = None
+            self._add_trace_log("LLM_CLIENT_INIT_ERROR", model=model_name, error=str(e))
+            print(f"Interpreter: Error initializing OpenAI client for model '{model_name}': {e}")
+
 
     def _validate_inputs(self, provided_inputs: Dict[str, Any]):
         """
@@ -224,19 +258,70 @@ class Interpreter:
         final_prompt_for_llm = "\n\n".join(full_prompt_parts)
         print(f"    - Rendered Prompt for LLM: \n\"{final_prompt_for_llm}\"")
 
-        if not self.llm_client:
-            self._add_trace_log("LLM_CALL_SKIPPED", reason="LLM client not initialized.")
-            print("    WARNING: LLM client not initialized. Skipping actual LLM call.")
-            return f"SIMULATED_LLM_RESPONSE_FOR_PROMPT: {rendered_text[:50]}..."
+        if self.llm_client is None: # Check if client was successfully initialized
+            # This can happen if API key was missing or model not specified during _initialize_llm_client.
+            error_message = "LLM client is not initialized. Check API key and model configuration."
+            self._add_trace_log("LLM_CALL_FAILED", reason=error_message, client_instance=str(self.llm_client))
+            raise ConnectionRefusedError(error_message)
 
-        simulated_response = f"Simulated LLM Output for: '{rendered_text[:30]}...'"
-        self._add_trace_log("LLM_CALL_SIMULATED", client=str(self.llm_client), prompt_sent=final_prompt_for_llm, simulated_response=simulated_response)
-        print(f"    - (Simulated) LLM Call with client: {self.llm_client}")
+        # Construct messages for OpenAI API
+        messages = []
+        persona_obj = self.context.get_variable("__persona__", None) # Already fetched earlier for constructing final_prompt_for_llm
+        if persona_obj and persona_obj.role: # Assuming persona.role maps to system message content
+            # A more complex persona might need specific formatting. For now, use role, style, tone.
+            system_content = f"Role: {persona_obj.role}"
+            if persona_obj.style: system_content += f", Style: {persona_obj.style}"
+            if persona_obj.tone: system_content += f", Tone: {persona_obj.tone}"
+            if persona_obj.audience: system_content += f", Audience: {persona_obj.audience}"
+            messages.append({"role": "system", "content": system_content})
+
+        for example in step.examples:
+            if "input" in example and "output" in example:
+                messages.append({"role": "user", "content": example["input"]})
+                messages.append({"role": "assistant", "content": example["output"]})
+
+        messages.append({"role": "user", "content": rendered_text}) # The main prompt
+
+        try:
+            self._add_trace_log("LLM_API_CALL_START", model=self.pil_program.config.model, messages=messages, parameters=self.pil_program.config.parameters)
+            print(f"    - Making API call to OpenAI model: {self.pil_program.config.model} with params: {self.pil_program.config.parameters}")
+
+            completion = self.llm_client.chat.completions.create(
+                model=self.pil_program.config.model,
+                messages=messages,
+                **self.pil_program.config.parameters # Pass parameters like temperature, max_tokens
+            )
+
+            llm_response_content = completion.choices[0].message.content
+            self._add_trace_log("LLM_API_CALL_SUCCESS", response_id=completion.id, finish_reason=completion.choices[0].finish_reason, usage=completion.usage)
+            print(f"    - LLM Response received. Finish reason: {completion.choices[0].finish_reason}")
+
+        except openai.APIConnectionError as e:
+            err_msg = f"OpenAI API request failed to connect: {e}"
+            self._add_trace_log("LLM_API_CALL_ERROR", error_type="APIConnectionError", error_message=str(e))
+            raise ConnectionError(err_msg) from e
+        except openai.RateLimitError as e:
+            err_msg = f"OpenAI API request exceeded rate limit: {e}"
+            self._add_trace_log("LLM_API_CALL_ERROR", error_type="RateLimitError", error_message=str(e))
+            raise PermissionError(err_msg) from e # Or a custom RateLimitError
+        except openai.AuthenticationError as e:
+            err_msg = f"OpenAI API authentication failed: {e}. Check your API key."
+            self._add_trace_log("LLM_API_CALL_ERROR", error_type="AuthenticationError", error_message=str(e))
+            raise PermissionError(err_msg) from e
+        except openai.APIStatusError as e: # Catch other API errors
+            err_msg = f"OpenAI API returned an error status {e.status_code}: {e.response}"
+            self._add_trace_log("LLM_API_CALL_ERROR", error_type="APIStatusError", status_code=e.status_code, error_message=str(e.response))
+            raise RuntimeError(err_msg) from e
+        except Exception as e: # Catch any other unexpected errors during API call
+            err_msg = f"An unexpected error occurred during OpenAI API call: {e}"
+            self._add_trace_log("LLM_API_CALL_ERROR", error_type="UnexpectedError", error_message=str(e))
+            raise RuntimeError(err_msg) from e
 
         if step.constraints:
-            self._add_trace_log("CONSTRAINT_TODO", step_type="PromptStep", constraints=step.constraints)
+            self._add_trace_log("CONSTRAINT_TODO", step_type="PromptStep", constraints=step.constraints, llm_output=llm_response_content)
             print(f"    - TODO: Apply constraints to LLM output: {step.constraints}")
-        return simulated_response
+
+        return llm_response_content
 
     def _execute_retrieve_step(self, step: RetrieveStep) -> List[Dict[str, Any]]:
         context_vars = self.context.get_all_variables()

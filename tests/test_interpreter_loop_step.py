@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch, MagicMock # Added import
 from typing import Dict, Any, List
 
 from pil_engine.core.components import PilProgram, LoopStep, PromptStep, CodeStep, LoopType
@@ -6,15 +7,18 @@ from pil_engine.interpreter import Interpreter, PilParser
 from pil_engine.core.context import Context
 
 # Helper to quickly create a PilProgram for testing loop steps
-def create_loop_test_program(loop_yaml_snippet: Dict[str, Any], initial_vars: Dict[str, Any] = None) -> PilProgram:
+def create_loop_test_program(loop_yaml_snippet: Dict[str, Any], initial_vars: Dict[str, Any] = None, add_dummy_api_key_to_config: bool = False) -> PilProgram:
     base_program_dict = {
-        "config": {"model": "test-model"},
+        "config": {"model": "test-model"}, # Default model name
         "workflow": {
             "steps": [
                 loop_yaml_snippet # The loop step itself
             ]
         }
     }
+    if add_dummy_api_key_to_config:
+        base_program_dict["config"]["api_key"] = "dummy_test_key_for_mocking"
+
     if initial_vars:
         # Add input definitions if initial_vars are provided, for completeness, though not strictly enforced by current Input component
         base_program_dict["input"] = {"vars": {k: type(v).__name__ for k,v in initial_vars.items()}}
@@ -24,7 +28,19 @@ def create_loop_test_program(loop_yaml_snippet: Dict[str, Any], initial_vars: Di
 
 class TestInterpreterLoopStep(unittest.TestCase):
 
-    def test_for_each_loop_simple_list(self):
+    @patch('openai.OpenAI') # Mock OpenAI for tests involving PromptStep
+    def test_for_each_loop_simple_list(self, MockOpenAI):
+        # Configure the mock client
+        mock_client_instance = MockOpenAI.return_value
+        mock_completion = MagicMock()
+        # Simulate different responses based on input to distinguish iterations
+        def side_effect_func(*args, **kwargs):
+            prompt_content = kwargs['messages'][-1]['content'] # Get the user prompt
+            mock_resp = MagicMock()
+            mock_resp.choices = [MagicMock(message=MagicMock(content=f"Mocked: {prompt_content}"))]
+            return mock_resp
+        mock_client_instance.chat.completions.create.side_effect = side_effect_func
+
         # The loop_yaml_snippet IS the step definition itself
         loop_yaml_snippet = {
             "for": "item in ${my_items}",
@@ -34,10 +50,11 @@ class TestInterpreterLoopStep(unittest.TestCase):
             "def": "loop_results"
         }
         initial_context_vars = {"my_items": ["apple", "banana"]}
-        program = create_loop_test_program(loop_yaml_snippet, initial_vars=initial_context_vars)
+        # Add dummy API key so client initialization is attempted (and thus mocked)
+        program = create_loop_test_program(loop_yaml_snippet, initial_vars=initial_context_vars, add_dummy_api_key_to_config=True)
 
         interpreter = Interpreter(pil_program=program, initial_vars=initial_context_vars, debug_mode=False)
-        final_output = interpreter.run() # The run method itself doesn't directly return the loop output, it's in context
+        final_output = interpreter.run()
 
         loop_output_in_context = interpreter.context.get_variable("loop_results")
         self.assertIsInstance(loop_output_in_context, list)
