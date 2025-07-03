@@ -1,6 +1,6 @@
 import yaml
 import asteval # For CodeStep execution sandbox
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Callable # Added Callable
 
 from .core.components import (
     PilProgram, parse_step, BaseStep, PromptStep, RetrieveStep, ToolStep, CodeStep, IfStep, LoopStep, StepType, LoopType
@@ -112,9 +112,23 @@ class Interpreter:
         self.debug_mode: bool = debug_mode
         self.trace_log: List[Dict[str, Any]] = [] if self.debug_mode else None
         self.knowledge_bases: Dict[str, List[Dict[str, Any]]] = {}
+        self.tool_registry: Dict[str, Callable] = {} # Added tool registry
 
         self._initialize_llm_client()
         self._load_all_knowledge_bases()
+
+    def register_tool(self, name: str, tool_callable: Callable):
+        """Registers a tool (Python callable) with the interpreter."""
+        if not isinstance(name, str) or not name:
+            raise ValueError("Tool name must be a non-empty string.")
+        if not callable(tool_callable):
+            raise TypeError(f"Tool '{name}' must be a callable Python function or method.")
+        if name in self.tool_registry:
+            print(f"Interpreter Warning: Tool '{name}' is being re-registered. Overwriting previous definition.")
+        self.tool_registry[name] = tool_callable
+        self._add_trace_log("TOOL_REGISTERED", tool_name=name, callable_info=str(tool_callable))
+        print(f"Interpreter: Tool '{name}' registered.")
+
 
     def _add_trace_log(self, event_type: str, **kwargs):
         """Adds a structured entry to the trace log if debug_mode is enabled."""
@@ -434,16 +448,41 @@ class Interpreter:
 
     def _execute_tool_step(self, step: ToolStep) -> Any:
         context_vars = self.context.get_all_variables()
-        rendered_args = {arg_name: render_template_string(val_tpl, context_vars) for arg_name, val_tpl in step.args.items()}
-        self._add_trace_log("TEMPLATE_RENDERED", step_type="ToolStep", original_args=step.args, rendered_args=rendered_args)
+
+        # Render argument values from context
+        rendered_args = {}
+        for arg_name, val_template in step.args.items():
+            if isinstance(val_template, str):
+                rendered_args[arg_name] = render_template_string(val_template, context_vars)
+            else: # Pass non-string args (like numbers, booleans from YAML) as is
+                rendered_args[arg_name] = val_template
+
+        self._add_trace_log("TOOL_ARGS_RENDERED", step_type="ToolStep", tool_name=step.name, original_args=step.args, rendered_args=rendered_args)
         print(f"    - Tool Call: name='{step.name}', args={rendered_args}")
 
-        if step.name == "weather_api":
-            sim_tool_output = f"Simulated weather for {rendered_args.get('city', 'unknown')}: Sunny, 25 C"
-        else:
-            sim_tool_output = f"Simulated output from tool '{step.name}' with args {rendered_args}"
-        self._add_trace_log("TOOL_CALL_SIMULATED", tool_name=step.name, args=rendered_args, simulated_output=sim_tool_output)
-        return sim_tool_output
+        if step.name not in self.tool_registry:
+            error_msg = f"Tool '{step.name}' not found in registry. Available tools: {list(self.tool_registry.keys())}"
+            self._add_trace_log("TOOL_CALL_ERROR", tool_name=step.name, reason="Tool not found")
+            raise KeyError(error_msg) # Or a custom ToolNotFoundException
+
+        tool_callable = self.tool_registry[step.name]
+
+        try:
+            self._add_trace_log("TOOL_EXECUTION_START", tool_name=step.name, args_passed=rendered_args)
+            tool_output = tool_callable(**rendered_args)
+            self._add_trace_log("TOOL_EXECUTION_SUCCESS", tool_name=step.name, output=str(tool_output))
+            print(f"    - Tool '{step.name}' executed successfully.")
+            return tool_output
+        except TypeError as e: # Mismatched arguments, etc.
+            error_msg = f"Error calling tool '{step.name}' with args {rendered_args}: {e}"
+            self._add_trace_log("TOOL_EXECUTION_ERROR", tool_name=step.name, error_type="TypeError", error_message=str(e))
+            raise TypeError(error_msg) from e # Re-raise as TypeError to be potentially caught by user code
+        except Exception as e: # Catch any other exception from the tool itself
+            error_msg = f"Tool '{step.name}' raised an exception: {e}"
+            self._add_trace_log("TOOL_EXECUTION_ERROR", tool_name=step.name, error_type=type(e).__name__, error_message=str(e))
+            # Wrap in a more generic RuntimeError or a custom ToolExecutionError
+            raise RuntimeError(error_msg) from e
+
 
     def _execute_code_step(self, step: CodeStep) -> Any:
         if step.lang.lower() != 'python':
