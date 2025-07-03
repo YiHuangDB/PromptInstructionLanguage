@@ -1,0 +1,32 @@
+[
+  {
+    "id": "doc1",
+    "title": "About PIL",
+    "content": "Prompt Instruction Language (PIL) is a domain-specific language designed for programming Large Language Models (LLMs). It aims to provide a robust, scalable, and maintainable framework.",
+    "keywords": ["PIL", "LLM", "DSL", "programming"]
+  },
+  {
+    "id": "doc2",
+    "title": "RAG in LLMs",
+    "content": "Retrieval-Augmented Generation (RAG) is a technique to improve LLM performance by retrieving relevant documents from an external knowledge base and providing them as context to the LLM.",
+    "keywords": ["RAG", "LLM", "retrieval", "context"]
+  },
+  {
+    "id": "doc3",
+    "title": "PIL Core Features",
+    "content": "PIL's core features include a declarative YAML syntax, support for embedded Python (code steps), first-class RAG and agent patterns, and structured output definitions.",
+    "keywords": ["PIL", "features", "YAML", "RAG", "agents"]
+  },
+  {
+    "id": "doc4",
+    "title": "Jinja2 Templating",
+    "content": "PIL uses Jinja2 for its templating engine, allowing dynamic substitution of variables within prompt text and other fields using {{ variable_name }} syntax.",
+    "keywords": ["PIL", "Jinja2", "templating", "variables"]
+  },
+  {
+    "id": "doc5",
+    "title": "Future of PIL",
+    "content": "Future plans for PIL include a compiler for self-optimization, advanced IDE support via LSP, and enhanced security features against prompt injection.",
+    "keywords": ["PIL", "future", "compiler", "LSP", "security"]
+  }
+]

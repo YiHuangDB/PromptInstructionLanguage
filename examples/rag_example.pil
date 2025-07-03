@@ -1,0 +1,76 @@
+# PIL Program: RAG Example using Retrieve Step
+
+config:
+  model: openai/gpt-4o-mini # or your preferred model
+  parameters:
+    temperature: 0.0
+
+persona:
+  role: >
+    You are a helpful AI assistant. Your task is to answer questions
+    based *only* on the provided context snippets. If the answer is not
+    found in the context, say "I don't know based on the provided context."
+
+input:
+  vars:
+    user_question: string
+
+outputSchema:
+  schema:
+    type: object
+    properties:
+      answer:
+        type: string
+        description: "The answer to the user's question, based on the context."
+      retrieved_ids:
+        type: array
+        items:
+          type: string
+        description: "List of IDs of the retrieved documents used for the answer."
+    required: ["answer"]
+
+workflow:
+  steps:
+    - retrieve:
+        from: "examples/knowledge_base.json" # Path to our mock KB
+        query: "{{ user_question }}"         # User's question will be substituted here
+        k: 2                                 # Get top 2 relevant chunks
+        def: "retrieved_chunks"              # Store result in this context variable
+
+    - prompt:
+        # This uses a Jinja2 'for' loop to format the retrieved chunks.
+        # The 'map' filter extracts the 'content' attribute from each chunk.
+        # The 'join' filter concatenates them with a separator.
+        # Note: For complex objects in 'retrieved_chunks', direct Jinja2 access like
+        # {{ chunk.content }} inside the loop is standard.
+        # The example below prepares a string of contexts.
+        text: |
+          Context snippets:
+          {% for chunk in retrieved_chunks %}
+          --- Document ID: {{ chunk.id }} ---
+          Title: {{ chunk.title }}
+          Content: {{ chunk.content }}
+          {% endfor %}
+          --- End of Context Snippets ---
+
+          User Question: {{ user_question }}
+
+          Based *only* on the provided context snippets, please answer the user's question.
+          If the answer is not found in the context, say "I don't know based on the provided context."
+        def: "llm_answer_raw" # This will be the direct string output from the LLM
+
+    # Example of a code step to structure the final output if needed,
+    # or this could be part of the prompt that asks for JSON output.
+    # For now, we'll assume the LLM can be prompted to give a simple answer string.
+    # The outputSchema would ideally be enforced by the interpreter later.
+    - code:
+        lang: python
+        script: |
+          # For now, assume llm_answer_raw is just the text answer.
+          # A more robust implementation would parse structured output if requested from LLM.
+          ids = [chunk.get('id', 'unknown') for chunk in retrieved_chunks]
+          result = {
+              "answer": llm_answer_raw,
+              "retrieved_ids": ids
+          }
+        def: "final_output_object"

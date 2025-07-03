@@ -1,14 +1,16 @@
 import unittest
 from unittest.mock import MagicMock, patch, ANY
-from io import StringIO # Added
+from io import StringIO
 import openai # For APIError and mocking client
+import os     # Added
+import json   # Added
 from openai.types.chat import ChatCompletionMessage, ChatCompletion
 from openai.types.chat.chat_completion import Choice
 
 
 from pil_interpreter.evaluator import Evaluator, DEFAULT_MODEL
 from pil_interpreter.context import ExecutionContext
-from pil_interpreter.exceptions import PILSyntaxError, PILSemanticError
+from pil_interpreter.exceptions import PILSyntaxError, PILSemanticError, PILError # Added PILError
 
 class TestEvaluator(unittest.TestCase):
 
@@ -241,14 +243,177 @@ class TestEvaluator(unittest.TestCase):
             self.assertEqual(evaluator._substitute_variables(text), text) # Should return original on syntax error
             self.assertIn("Jinja2 syntax error", mock_stderr.getvalue())
 
-
-    @patch('builtins.print')
+    @patch('builtins.print') # Ensuring this line is correctly indented
     def test_run_workflow_unknown_step_type(self, mock_print):
         program_data = {"workflow": {"steps": [{"unknown_step": {"param": "value"}}]}}
         evaluator = Evaluator(program_data, self._create_real_context(), openai_client=self.mock_openai_client)
         evaluator.run_workflow()
         mock_print.assert_any_call("  Warning: Unknown step type 'unknown_step' at step 1. Content: {'param': 'value'}", file=ANY)
 
+# --- Tests for _handle_retrieve_step ---
+class TestRetrieveStep(unittest.TestCase): # Ensure this class is at column 0
+    def setUp(self):
+        self.test_dir = "test_kb_files"
+        os.makedirs(self.test_dir, exist_ok=True)
+        self.kb_path = os.path.join(self.test_dir, "test_kb.json")
+        self.sample_kb_data = [
+            {"id": "r1", "content": "Info about apples and bananas", "keywords": ["fruit", "apple"]},
+            {"id": "r2", "content": "The best apples are green", "keywords": ["apple", "green"]},
+            {"id": "r3", "content": "Oranges and citrus fruits", "keywords": ["fruit", "orange"]},
+            {"id": "r4", "content": "Another document about nothing specific", "keywords": ["generic"]},
+        ]
+        with open(self.kb_path, 'w') as f:
+            json.dump(self.sample_kb_data, f)
+
+        self.context = ExecutionContext()
+        # Mock OpenAI client, though not used directly by retrieve, Evaluator expects it
+        self.mock_openai_client = MagicMock(spec=openai.OpenAI)
+        self.program_data_template = {"workflow": {"steps": [{"retrieve": {}}]}}
+
+
+    def tearDown(self):
+        # Robustly remove all files in test_dir before removing the directory
+        if os.path.exists(self.test_dir):
+            for item in os.listdir(self.test_dir):
+                item_path = os.path.join(self.test_dir, item)
+                try:
+                    if os.path.isfile(item_path) or os.path.islink(item_path):
+                        os.unlink(item_path)
+                    # Could add elif os.path.isdir(item_path): shutil.rmtree(item_path) for subdirs
+                except Exception as e:
+                    print(f"Warning: Failed to delete {item_path} during teardown: {e}")
+            try:
+                os.rmdir(self.test_dir)
+            except Exception as e:
+                print(f"Warning: Failed to delete directory {self.test_dir} during teardown: {e}")
+
+
+    def _run_retrieve_step(self, retrieve_config):
+        self.program_data_template["workflow"]["steps"][0]["retrieve"] = retrieve_config
+        evaluator = Evaluator(self.program_data_template, self.context, self.mock_openai_client)
+        # Removed patch('builtins.print') from here to see if it resolves assertRaises issue
+        evaluator.run_workflow()
+
+
+    def test_retrieve_successful_match_content(self):
+        config = {"from": self.kb_path, "query": "apples", "k": 2, "def": "docs"}
+        self._run_retrieve_step(config)
+        retrieved = self.context.get_variable("docs")
+        self.assertEqual(len(retrieved), 2)
+        self.assertTrue(any(d["id"] == "r1" for d in retrieved))
+        self.assertTrue(any(d["id"] == "r2" for d in retrieved))
+
+    def test_retrieve_successful_match_keywords(self):
+        config = {"from": self.kb_path, "query": "orange", "k": 1, "def": "citrus_docs"}
+        self._run_retrieve_step(config)
+        retrieved = self.context.get_variable("citrus_docs")
+        self.assertEqual(len(retrieved), 1)
+        self.assertEqual(retrieved[0]["id"], "r3")
+
+    def test_retrieve_k_parameter_respected(self):
+        config = {"from": self.kb_path, "query": "fruit", "k": 1, "def": "one_fruit_doc"}
+        self._run_retrieve_step(config)
+        retrieved = self.context.get_variable("one_fruit_doc")
+        self.assertEqual(len(retrieved), 1)
+        # The order might depend on scoring, so check if it's one of the expected
+        self.assertIn(retrieved[0]["id"], ["r1", "r3"])
+
+
+    def test_retrieve_variable_substitution(self):
+        self.context.set_variable("kb_file", self.kb_path)
+        self.context.set_variable("search_term", "green apples")
+        config = {"from": "{{ kb_file }}", "query": "{{ search_term }}", "k": 1, "def": "green_docs"}
+        self._run_retrieve_step(config)
+        retrieved = self.context.get_variable("green_docs")
+        self.assertEqual(len(retrieved), 1)
+        self.assertEqual(retrieved[0]["id"], "r2")
+
+
+    def test_retrieve_file_not_found(self):
+        config = {"from": "non_existent.json", "query": "test", "k": 1, "def": "error_docs"}
+        with self.assertRaisesRegex(PILError, "Knowledge base file not found"):
+            self._run_retrieve_step(config)
+
+    def test_retrieve_malformed_json(self):
+        malformed_json_path = os.path.join(self.test_dir, "malformed.json")
+        with open(malformed_json_path, 'w') as f:
+            f.write("[{'id': 'bad'}]") # Single quotes are invalid JSON
+
+        config = {"from": malformed_json_path, "query": "test", "k": 1, "def": "error_docs"}
+        with self.assertRaisesRegex(PILSyntaxError, "Invalid JSON"):
+            self._run_retrieve_step(config)
+        os.remove(malformed_json_path)
+
+    def test_retrieve_kb_not_a_list(self):
+        not_list_kb_path = os.path.join(self.test_dir, "not_list_kb.json")
+        with open(not_list_kb_path, 'w') as f:
+            json.dump({"error": "not a list"}, f)
+
+        config = {"from": not_list_kb_path, "query": "test", "k": 1, "def": "error_docs"}
+        with self.assertRaisesRegex(PILSemanticError, "must contain a JSON list of documents"):
+            self._run_retrieve_step(config)
+        os.remove(not_list_kb_path)
+
+    def test_retrieve_invalid_k_value(self):
+        config = {"from": self.kb_path, "query": "test", "k": -1, "def": "error_docs"}
+        with self.assertRaisesRegex(PILSemanticError, "'k' must be a non-negative integer"):
+            self._run_retrieve_step(config)
+
+        config_str_k = {"from": self.kb_path, "query": "test", "k": "one", "def": "error_docs"}
+        with self.assertRaisesRegex(PILSemanticError, "'k' must be a non-negative integer"):
+            self._run_retrieve_step(config_str_k)
+
+
+    def test_retrieve_missing_parameters(self):
+        mandatory_keys = {"from": self.kb_path, "query": "q", "def": "d"}
+        # 'k' is optional as it has a default in the implementation
+
+        for key_to_remove in mandatory_keys.keys():
+            config = mandatory_keys.copy()
+            # Add 'k' back temporarily as it's not what we are testing for removal here,
+            # but its absence would be fine. We are testing removal of mandatory ones.
+            config_to_test = mandatory_keys.copy()
+            if 'k' not in config_to_test : config_to_test['k'] = 1 # ensure k is present for this test setup
+
+            del config_to_test[key_to_remove]
+
+            # If 'k' was the one removed for this iteration, and it's optional, skip asserting error
+            # This test is for *mandatory* keys.
+            # Actually, the loop is over mandatory_keys, so 'k' is not included.
+
+            with self.assertRaises(PILSemanticError, msg=f"Failed for missing mandatory key: {key_to_remove}"):
+                self._run_retrieve_step(config_to_test)
+
+    @patch('builtins.print') # Apply patch here
+    def test_retrieve_empty_query(self, mock_print_for_test): # Add mock argument
+        config = {"from": self.kb_path, "query": "", "k": 3, "def": "empty_query_docs"}
+        expected_msg = "Retrieve step must have a 'query' field as a string template."
+
+        # Inlined logic from _run_retrieve_step for this specific test
+        # self.context and self.mock_openai_client are from setUp of TestRetrieveStep
+        program_data_template = {"workflow": {"steps": [{"retrieve": config}]}}
+        evaluator = Evaluator(program_data_template, self.context, self.mock_openai_client)
+
+        with self.assertRaises(PILSemanticError) as cm:
+            evaluator.run_workflow() # Direct call that should raise
+        self.assertEqual(str(cm.exception), expected_msg)
+
+
+    def test_retrieve_no_matching_documents(self):
+        config = {"from": self.kb_path, "query": "qwertyuiopasdfghjkl", "k": 3, "def": "no_match_docs"}
+        self._run_retrieve_step(config)
+        retrieved = self.context.get_variable("no_match_docs")
+        self.assertEqual(len(retrieved), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+# Need to re-add main test execution for all tests if this file is run directly
+# For example, by creating a suite or running individual test classes
+# if __name__ == '__main__':
+#     suite = unittest.TestSuite()
+#     suite.addTest(unittest.makeSuite(TestEvaluator)) # Assuming TestEvaluator is the original class
+#     suite.addTest(unittest.makeSuite(TestRetrieveStep))
+#     runner = unittest.TextTestRunner()
+#     runner.run(suite)

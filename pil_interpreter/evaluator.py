@@ -2,6 +2,7 @@ import sys # For print to stderr
 import openai
 from openai import APIError
 import jinja2 # Added
+import json # Added
 
 from .context import ExecutionContext
 from .exceptions import PILSemanticError, PILSyntaxError, PILError
@@ -55,6 +56,92 @@ class Evaluator:
             # Catch other potential rendering errors
             print(f"Warning: Unexpected error during Jinja2 variable substitution: {e}", file=sys.stderr)
             return text
+
+    def _handle_retrieve_step(self, step_config: dict):
+        if not isinstance(step_config, dict):
+            raise PILSemanticError("Retrieve step configuration must be a dictionary.")
+
+        from_source = step_config.get("from")
+        query_template = step_config.get("query")
+        k = step_config.get("k", 3) # Default to k=3 if not specified
+        output_var_name = step_config.get("def")
+
+        if not from_source or not isinstance(from_source, str):
+            raise PILSemanticError("Retrieve step must have a 'from' field as a string (filepath).")
+        if not query_template or not isinstance(query_template, str): # Original check restored
+            raise PILSemanticError("Retrieve step must have a 'query' field as a string template.")
+        if not output_var_name or not isinstance(output_var_name, str):
+            raise PILSemanticError("Retrieve step must have a 'def' field as a string (variable name).")
+        if not isinstance(k, int) or k < 0:
+            raise PILSemanticError("Retrieve step 'k' must be a non-negative integer.")
+
+        # Substitute variables in 'from' and 'query'
+        actual_from_source = self._substitute_variables(from_source)
+        actual_query = self._substitute_variables(query_template).lower() # Lowercase query for case-insensitive match
+
+        print(f"    Retrieving from: '{actual_from_source}', Query: '{actual_query}', k: {k}")
+
+        retrieved_documents = []
+        try:
+            with open(actual_from_source, 'r', encoding='utf-8') as f:
+                knowledge_base = json.load(f)
+
+            if not isinstance(knowledge_base, list):
+                raise PILSemanticError(f"Knowledge base file '{actual_from_source}' must contain a JSON list of documents.")
+
+            # Very basic mock retrieval: keyword matching in 'content' or 'keywords'
+            # This is a placeholder for more sophisticated retrieval (e.g., semantic search)
+            for doc in knowledge_base:
+                if not isinstance(doc, dict):
+                    print(f"    Warning: Skipping invalid document (not a dict) in '{actual_from_source}'.", file=sys.stderr)
+                    continue
+
+                content_to_search = str(doc.get("content", "")).lower()
+                keywords_to_search = [str(kw).lower() for kw in doc.get("keywords", []) if isinstance(kw, str)]
+                title_to_search = str(doc.get("title", "")).lower()
+
+                # Simple query splitting for "AND" logic on keywords
+                query_terms = [term.strip() for term in actual_query.split() if term.strip()]
+
+                match_score = 0
+                if all(term in content_to_search for term in query_terms):
+                    match_score += 2 # Higher weight for content match
+                if any(all(term in kw for term in query_terms) for kw in keywords_to_search): # Check if all query terms are in any single keyword phrase
+                    match_score +=1
+                if all(term in title_to_search for term in query_terms):
+                     match_score +=1
+
+
+                if actual_query in content_to_search: # Broader match
+                    match_score +=1
+                if actual_query in title_to_search:
+                    match_score +=1
+
+                if any(actual_query in kw for kw in keywords_to_search):
+                     match_score +=1
+
+
+                if match_score > 0:
+                    retrieved_documents.append({"doc": doc, "score": match_score})
+
+            # Sort by score (descending) and then take top k
+            retrieved_documents.sort(key=lambda x: x["score"], reverse=True)
+            final_docs = [item["doc"] for item in retrieved_documents[:k]]
+
+
+        except FileNotFoundError:
+            raise PILError(f"Knowledge base file not found: {actual_from_source}")
+        except json.JSONDecodeError as e: # Capture original exception
+            raise PILSyntaxError(f"Invalid JSON in knowledge base file: {actual_from_source}. Details: {e}")
+        except (PILSyntaxError, PILSemanticError): # Let these specific PIL errors propagate
+            raise
+        except Exception as e: # Catch-all for other *unexpected* errors during retrieval
+            # Consider if this should also be a more specific PILError subtype
+            raise PILError(f"Unexpected error during retrieval from '{actual_from_source}': {e}")
+
+        self.context.set_variable(output_var_name, final_docs)
+        print(f"    Retrieved {len(final_docs)} documents and stored in context variable: '{output_var_name}'")
+
 
     def _handle_prompt_step(self, step_config: dict):
         if not isinstance(step_config, dict):
@@ -151,12 +238,12 @@ class Evaluator:
 
             if step_type == "prompt":
                 self._handle_prompt_step(step_config)
+            elif step_type == "retrieve":
+                self._handle_retrieve_step(step_config)
             elif step_type == "tool":
                 print(f"  Tool step found. Config: {step_config}") # Placeholder
             elif step_type == "code":
                 print(f"  Code step found. Config: {step_config}") # Placeholder
-            elif step_type == "retrieve":
-                print(f"  Retrieve step found. Config: {step_config}") # Placeholder
             else:
                 print(f"  Warning: Unknown step type '{step_type}' at step {i+1}. Content: {step_config}", file=sys.stderr)
 
