@@ -261,13 +261,88 @@ class TestInterpreterPromptStep(unittest.TestCase):
             prompt_text="Get a number",
             api_key="fake_key"
         )
-        pil_program.workflow.steps[0].constraints = Constraints.from_yaml({"type": "integer"})
+        # Get the PromptStep object and set constraints and max_retries
+        prompt_step_obj = pil_program.workflow.steps[0]
+        prompt_step_obj.constraints = Constraints.from_yaml({"type": "integer"})
+        prompt_step_obj.max_retries = 0 # Explicitly no retries for this test
 
         interpreter = Interpreter(pil_program)
-        prompt_step_obj = pil_program.workflow.steps[0]
+        # prompt_step_obj = pil_program.workflow.steps[0] # Already got it
 
         with self.assertRaisesRegex(ConstraintViolationError, "Type constraint violated.*Cannot convert value to 'integer'"):
             interpreter._execute_prompt_step(prompt_step_obj)
+        mock_client_instance.chat.completions.create.assert_called_once()
+
+
+    # --- Tests for Self-Correction Loop ---
+    @patch('openai.OpenAI')
+    def test_self_correction_no_retries_needed(self, MockOpenAI):
+        mock_client = MockOpenAI.return_value
+        mock_client.chat.completions.create.return_value = MagicMock(choices=[MagicMock(message=MagicMock(content="123"))])
+
+        program = create_prompt_test_program(prompt_text="Give a number", api_key="dummy")
+        prompt_step = program.workflow.steps[0]
+        prompt_step.constraints = Constraints.from_yaml({"type": "integer"})
+        prompt_step.max_retries = 1 # Allow retries, though not needed
+
+        interpreter = Interpreter(program)
+        result = interpreter._execute_prompt_step(prompt_step)
+
+        self.assertEqual(result, 123)
+        mock_client.chat.completions.create.assert_called_once() # Called only once
+
+    @patch('openai.OpenAI')
+    def test_self_correction_succeeds_on_retry(self, MockOpenAI):
+        mock_client = MockOpenAI.return_value
+        mock_client.chat.completions.create.side_effect = [
+            MagicMock(choices=[MagicMock(message=MagicMock(content="not an int"))]), # First call fails
+            MagicMock(choices=[MagicMock(message=MagicMock(content="42"))])          # Second call succeeds
+        ]
+
+        program = create_prompt_test_program(prompt_text="Initial prompt", api_key="dummy")
+        prompt_step = program.workflow.steps[0]
+        prompt_step.constraints = Constraints.from_yaml({"type": "integer"})
+        prompt_step.max_retries = 1
+
+        interpreter = Interpreter(program)
+        result = interpreter._execute_prompt_step(prompt_step)
+
+        self.assertEqual(result, 42)
+        self.assertEqual(mock_client.chat.completions.create.call_count, 2)
+
+        # Check that the second call's prompt included correction info
+        second_call_args = mock_client.chat.completions.create.call_args_list[1]
+        messages_for_retry = second_call_args.kwargs['messages']
+        last_user_message_for_retry = messages_for_retry[-1]['content']
+
+        self.assertIn("Initial prompt", last_user_message_for_retry)
+        self.assertIn("[System Correction]", last_user_message_for_retry)
+        self.assertIn("Your previous response failed validation.", last_user_message_for_retry)
+        self.assertIn("Error: \"Type constraint violated", last_user_message_for_retry) # Part of ConstraintViolationError message
+        self.assertIn("not an int", last_user_message_for_retry) # The failing value
+
+    @patch('openai.OpenAI')
+    def test_self_correction_all_retries_fail(self, MockOpenAI):
+        mock_client = MockOpenAI.return_value
+        mock_client.chat.completions.create.side_effect = [
+            MagicMock(choices=[MagicMock(message=MagicMock(content="fail1"))]),
+            MagicMock(choices=[MagicMock(message=MagicMock(content="fail2"))])
+        ]
+
+        program = create_prompt_test_program(prompt_text="Initial prompt", api_key="dummy")
+        prompt_step = program.workflow.steps[0]
+        prompt_step.constraints = Constraints.from_yaml({"type": "integer"})
+        prompt_step.max_retries = 1 # One initial call, one retry
+
+        interpreter = Interpreter(program)
+
+        with self.assertRaisesRegex(ConstraintViolationError, "Cannot convert value to 'integer'") as cm:
+            interpreter._execute_prompt_step(prompt_step) # Call only once
+
+        self.assertEqual(mock_client.chat.completions.create.call_count, 2) # Initial + 1 retry
+
+        # Verify the error message contains details from the *last* failure
+        self.assertIn("fail2", str(cm.exception.constrained_value)) # Access exception from context manager
 
 
 if __name__ == '__main__':

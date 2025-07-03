@@ -104,15 +104,21 @@ class BaseStep:
 class PromptStep(BaseStep):
     text: str
     examples: List[Dict[str, str]] = field(default_factory=list) # List of {"input": "...", "output": "..."}
-    constraints: Optional[Dict[str, Any]] = None # Simplified for now
+    constraints: Optional[Constraints] = None # Changed from Dict to Constraints object
+    max_retries: int = 0 # Maximum number of self-correction retries
     # def_var is inherited for the output variable name
 
     @classmethod
     def from_yaml(cls, data: YamlData) -> 'PromptStep':
+        # Ensure 'constraints' data is parsed into a Constraints object if present
+        constraints_data = data.get('constraints')
+        parsed_constraints = Constraints.from_yaml(constraints_data) if constraints_data else None
+
         return cls(
             text=data['text'],
             examples=data.get('examples', []),
-            constraints=data.get('constraints'),
+            constraints=parsed_constraints,
+            max_retries=int(data.get('max_retries', 0)), # Ensure it's an int
             def_var=data.get('def')
         )
 
