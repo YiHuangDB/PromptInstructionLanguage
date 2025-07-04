@@ -456,8 +456,8 @@ class Interpreter:
         # For now, assuming it's relatively quick or this part will be refined.
         # Placeholder for potential asyncio.to_thread wrapping.
         local_sandbox_context = context_vars.copy()
-        aeval = asteval.Interpreter(symtable=local_sandbox_context, minimal=False)
 
+        aeval = asteval.Interpreter(symtable=local_sandbox_context, minimal=False)
         # Run synchronous asteval.eval in a thread pool
         loop = asyncio.get_event_loop()
         try:
@@ -473,9 +473,10 @@ class Interpreter:
             error_msg = "\n".join([err.get_error()[1] for err in aeval.error])
             self._add_trace_log("CODE_EXECUTION_ERROR", script=rendered_script, error=error_msg)
             raise ValueError(f"Error executing Python code step: {error_msg}\nScript:\n{rendered_script}")
+
         result_val = aeval.symtable.get('result', None)
         self._add_trace_log("CODE_EXECUTION_SUCCESS", script=rendered_script, result=str(result_val), sandbox_keys=list(aeval.symtable.keys()))
-        if 'result' not in aeval.symtable:
+        if 'result' not in aeval.symtable: # Should be redundant if result_val is fetched with .get
             print("    - CodeStep Warning: No 'result' variable found in script output. Returning None.")
         return result_val
 
@@ -660,7 +661,7 @@ class Interpreter:
                 print(f"Interpreter: PIL program execution attempt {current_retry_count + 1} successful.")
                 break # Exit retry loop on success
 
-            except (OutputValidationError, ConstraintViolationError) as e_val:
+            except (OutputValidationError, ConstraintViolationError, jsonschema.exceptions.ValidationError) as e_val: # Added jsonschema.exceptions.ValidationError
                 last_validation_error = e_val
                 logger.warning(f"Attempt {current_retry_count + 1} failed validation: {e_val}")
                 self._add_trace_log("PROGRAM_ATTEMPT_VALIDATION_FAILED", attempt=current_retry_count + 1, error_type=type(e_val).__name__, error_message=str(e_val))

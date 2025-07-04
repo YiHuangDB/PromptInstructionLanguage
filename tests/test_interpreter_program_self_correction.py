@@ -108,7 +108,7 @@ except NameError: # pil_last_error_info not defined (first run)
             if entry.get("event") == "PROGRAM_ATTEMPT_START" and entry.get("attempt") == 2:
                 if "pil_last_error_info" in entry.get("current_run_inputs", {}):
                     self.assertIn("Previous execution attempt failed", entry["current_run_inputs"]["pil_last_error_info"])
-                    self.assertIn("OutputValidationError", entry["current_run_inputs"]["pil_last_error_info"])
+                    self.assertIn("ValidationError", entry["current_run_inputs"]["pil_last_error_info"]) # Changed from OutputValidationError
                     error_info_passed_on_retry = True
                 break
         self.assertTrue(error_info_passed_on_retry, "pil_last_error_info should be in inputs for the retry attempt.")
