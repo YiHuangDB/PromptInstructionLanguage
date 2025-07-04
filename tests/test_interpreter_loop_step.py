@@ -7,7 +7,7 @@ from pil_engine.interpreter import Interpreter, PilParser
 from pil_engine.core.context import Context
 
 # Helper to quickly create a PilProgram for testing loop steps
-def create_loop_test_program(loop_yaml_snippet: Dict[str, Any], initial_vars: Dict[str, Any] = None, include_llm_config: bool = False) -> PilProgram:
+def create_loop_test_program(loop_yaml_snippet: Dict[str, Any], initial_vars_spec: Dict[str, str] = None, include_llm_config: bool = False) -> PilProgram:
     program_dict = {
         "config": {},
         "workflow": {
@@ -20,9 +20,9 @@ def create_loop_test_program(loop_yaml_snippet: Dict[str, Any], initial_vars: Di
         program_dict["config"]["model"] = "test-model-for-loop"
         program_dict["config"]["api_key"] = "dummy_test_key_for_mocking"
 
-    if initial_vars:
-        # Add input definitions if initial_vars are provided, for completeness, though not strictly enforced by current Input component
-        program_dict["input"] = {"vars": {k: type(v).__name__ for k,v in initial_vars.items()}}
+    if initial_vars_spec:
+        # Add input definitions based on the spec (name: type_str)
+        program_dict["input"] = {"vars": initial_vars_spec}
 
     parser = PilParser()
     return parser.parse_dict(program_dict)
@@ -45,19 +45,24 @@ class TestInterpreterLoopStep(unittest.IsolatedAsyncioTestCase): # Changed base 
         mock_client_instance.chat.completions.create = unittest.mock.AsyncMock(side_effect=async_side_effect_func)
 
         loop_yaml_snippet = {
-            "for": "item in ${my_items}",
+            "for": "item in {{my_items}}", # Should be {{...}} to match updated LoopStep regex
             "steps": [
                 {"prompt": {"text": "Processing {{ item }}", "def": "step_output"}}
             ],
             "def": "loop_results"
         }
-        initial_context_vars = {"my_items": ["apple", "banana"]}
-        program = create_loop_test_program(loop_yaml_snippet, initial_vars=initial_context_vars, include_llm_config=True)
+        # Define the *specification* of inputs for the program
+        input_vars_spec = {"my_items": "list"}
+        # Define the *actual values* for those inputs for this run
+        actual_input_values = {"my_items": ["apple", "banana"]}
 
-        interpreter = Interpreter(pil_program=program, initial_vars=initial_context_vars, debug_mode=False)
-        MockAsyncOpenAI.assert_called_with(api_key="dummy_test_key_for_mocking") # Updated mock name
+        program = create_loop_test_program(loop_yaml_snippet, initial_vars_spec=input_vars_spec, include_llm_config=True)
 
-        final_output = await interpreter.run() # Added await
+        # Interpreter no longer needs initial_vars if they are passed to run()
+        interpreter = Interpreter(pil_program=program, debug_mode=False)
+        MockAsyncOpenAI.assert_called_with(api_key="dummy_test_key_for_mocking")
+
+        final_output = await interpreter.run(inputs=actual_input_values) # Pass actual values to run
 
         loop_output_in_context = interpreter.context.get_variable("loop_results")
         self.assertIsInstance(loop_output_in_context, list)
@@ -173,7 +178,7 @@ class TestInterpreterLoopStep(unittest.IsolatedAsyncioTestCase): # Changed base 
         # The variable 'current_iter_output' itself, from the step's def, should also be scoped to the iteration.
         self.assertFalse(interpreter.context.has_variable("current_iter_output"))
 
-    async def test_for_range_loop_single_arg(self): # async
+    async def test_for_range_loop_single_arg(self):
         loop_yaml_snippet = {
             "for": "i in range(3)",
             "steps": [
@@ -181,14 +186,14 @@ class TestInterpreterLoopStep(unittest.IsolatedAsyncioTestCase): # Changed base 
             ],
             "def": "range_loop_output"
         }
-        program = create_loop_test_program(loop_yaml_snippet)
+        program = create_loop_test_program(loop_yaml_snippet) # No initial_vars_spec needed as range is static
         interpreter = Interpreter(pil_program=program, debug_mode=False)
-        await interpreter.run() # await
+        await interpreter.run()
 
         loop_results = interpreter.context.get_variable("range_loop_output")
-        self.assertEqual(loop_results, [0, 2, 4]) # 0*2, 1*2, 2*2
+        self.assertEqual(loop_results, [0, 2, 4])
 
-    async def test_for_range_loop_dynamic_args(self): # async
+    async def test_for_range_loop_dynamic_args(self):
         loop_yaml_snippet = {
             "for": "val in range({{start_val}}, {{end_val}})",
             "steps": [
@@ -196,15 +201,16 @@ class TestInterpreterLoopStep(unittest.IsolatedAsyncioTestCase): # Changed base 
             ],
             "def": "range_results_dynamic"
         }
-        initial_vars = {"start_val": 1, "end_val": 4}
-        program = create_loop_test_program(loop_yaml_snippet, initial_vars=initial_vars)
-        interpreter = Interpreter(pil_program=program, initial_vars=initial_vars, debug_mode=False)
-        await interpreter.run() # await
+        input_vars_spec = {"start_val": "integer", "end_val": "integer"}
+        actual_input_values = {"start_val": 1, "end_val": 4}
+        program = create_loop_test_program(loop_yaml_snippet, initial_vars_spec=input_vars_spec)
+        interpreter = Interpreter(pil_program=program, debug_mode=False)
+        await interpreter.run(inputs=actual_input_values)
 
         loop_output = interpreter.context.get_variable("range_results_dynamic")
         self.assertEqual(loop_output, [2, 3, 4])
 
-    async def test_while_loop_simple_condition(self): # async
+    async def test_while_loop_simple_condition(self):
         loop_yaml_snippet_final = {
              "while": "{{counter}} < 3",
              "steps": [
@@ -213,11 +219,11 @@ class TestInterpreterLoopStep(unittest.IsolatedAsyncioTestCase): # Changed base 
              ],
              "def": "while_loop_res"
         }
-
-        initial_vars = {"counter": 0}
-        program = create_loop_test_program(loop_yaml_snippet_final, initial_vars=initial_vars)
-        interpreter = Interpreter(pil_program=program, initial_vars=initial_vars, debug_mode=False)
-        await interpreter.run() # await
+        input_vars_spec = {"counter": "integer"}
+        actual_input_values = {"counter": 0}
+        program = create_loop_test_program(loop_yaml_snippet_final, initial_vars_spec=input_vars_spec)
+        interpreter = Interpreter(pil_program=program, debug_mode=False)
+        await interpreter.run(inputs=actual_input_values)
 
         loop_output = interpreter.context.get_variable("while_loop_res")
         self.assertEqual(loop_output, [0, 1, 2])
@@ -225,54 +231,57 @@ class TestInterpreterLoopStep(unittest.IsolatedAsyncioTestCase): # Changed base 
         self.assertTrue(interpreter.context.has_variable("value_to_collect_is_old_counter"))
         self.assertEqual(interpreter.context.get_variable("value_to_collect_is_old_counter"), 2)
 
-    async def test_loop_variable_scoping_for_each(self): # async
+    async def test_loop_variable_scoping_for_each(self):
         loop_yaml_snippet = {
-            "for": "item in ${my_list}",
+            "for": "item in {{my_list}}", # Should be {{...}}
             "steps": [
                 {"code": {"lang": "python", "script": "result = item * 10", "def": "inner_var_in_context"}},
                 {"code": {"lang": "python", "script": "result = {{inner_var_in_context}}", "def": "current_iter_output"}}
             ],
             "def": "collected_outputs"
         }
-        initial_vars = {"my_list": [1, 2]}
-        program = create_loop_test_program(loop_yaml_snippet, initial_vars=initial_vars)
-        interpreter = Interpreter(pil_program=program, initial_vars=initial_vars, debug_mode=True)
-        await interpreter.run() # await
+        input_vars_spec = {"my_list": "list"}
+        actual_input_values = {"my_list": [1, 2]}
+        program = create_loop_test_program(loop_yaml_snippet, initial_vars_spec=input_vars_spec)
+        interpreter = Interpreter(pil_program=program, debug_mode=True)
+        await interpreter.run(inputs=actual_input_values)
 
         results = interpreter.context.get_variable("collected_outputs")
         self.assertEqual(results, [10, 20])
         self.assertFalse(interpreter.context.has_variable("inner_var_in_context"))
         self.assertFalse(interpreter.context.has_variable("current_iter_output"))
 
-    async def test_for_each_empty_list(self): # async
+    async def test_for_each_empty_list(self):
         loop_yaml_snippet = {
-            "for": "item in ${empty_list}",
-            "steps": [{"prompt": {"text": "This should not run", "def": "dummy"}}], # Will warn about no LLM config
+            "for": "item in {{empty_list}}", # Should be {{...}}
+            "steps": [{"prompt": {"text": "This should not run", "def": "dummy"}}],
             "def": "loop_output_empty"
         }
-        initial_vars = {"empty_list": []}
-        program = create_loop_test_program(loop_yaml_snippet, initial_vars=initial_vars)
-        interpreter = Interpreter(pil_program=program, initial_vars=initial_vars)
-        await interpreter.run() # await
+        input_vars_spec = {"empty_list": "list"}
+        actual_input_values = {"empty_list": []}
+        program = create_loop_test_program(loop_yaml_snippet, initial_vars_spec=input_vars_spec)
+        interpreter = Interpreter(pil_program=program)
+        await interpreter.run(inputs=actual_input_values)
 
         results = interpreter.context.get_variable("loop_output_empty")
         self.assertEqual(results, [])
 
-    async def test_while_loop_condition_initially_false(self): # async
+    async def test_while_loop_condition_initially_false(self):
         loop_yaml_snippet = {
             "while": "{{flag}} == True",
-            "steps": [{"prompt": {"text": "Not executed", "def": "dummy"}}], # Will warn
+            "steps": [{"prompt": {"text": "Not executed", "def": "dummy"}}],
             "def": "while_false_output"
         }
-        initial_vars = {"flag": False}
-        program = create_loop_test_program(loop_yaml_snippet, initial_vars=initial_vars)
-        interpreter = Interpreter(pil_program=program, initial_vars=initial_vars)
-        await interpreter.run() # await
+        input_vars_spec = {"flag": "boolean"}
+        actual_input_values = {"flag": False}
+        program = create_loop_test_program(loop_yaml_snippet, initial_vars_spec=input_vars_spec)
+        interpreter = Interpreter(pil_program=program)
+        await interpreter.run(inputs=actual_input_values)
 
         results = interpreter.context.get_variable("while_false_output")
         self.assertEqual(results, [])
 
-    async def test_loop_without_def_var(self): # async
+    async def test_loop_without_def_var(self):
         loop_yaml_snippet = {
             "for": "i in range(1)",
             "steps": [

@@ -12,12 +12,12 @@ def create_retrieve_test_program(
     from_source: str,
     query: str,
     k: int = 3,
-    initial_vars: dict = None,
+    initial_vars_spec: dict = None, # Changed from initial_vars (data) to initial_vars_spec (name:type)
     def_var: str = "retrieved_docs"
 ) -> PilProgram:
 
     program_dict = {
-        "config": {}, # No model specified, so LLM client init will be skipped
+        "config": {},
         "workflow": {
             "steps": [
                 {
@@ -31,13 +31,13 @@ def create_retrieve_test_program(
             ]
         }
     }
-    if initial_vars:
-         program_dict["input"] = {"vars": {k: type(v).__name__ for k,v in initial_vars.items()}}
+    if initial_vars_spec: # If a spec for input variables is provided
+         program_dict["input"] = {"vars": initial_vars_spec}
 
     parser = PilParser()
     return parser.parse_dict(program_dict)
 
-class TestInterpreterRetrieveStep(unittest.IsolatedAsyncioTestCase): # Changed base class
+class TestInterpreterRetrieveStep(unittest.IsolatedAsyncioTestCase):
 
     @classmethod
     def setUpClass(cls):
@@ -74,17 +74,26 @@ class TestInterpreterRetrieveStep(unittest.IsolatedAsyncioTestCase): # Changed b
         self.assertAlmostEqual(retrieved_docs[1]["score"], 3.0)
 
 
-    async def test_retrieval_with_templating_in_query(self): # async
-        program_refined = create_retrieve_test_program(str(self.test_kb_path), "capital {{city_name}}", k=1, initial_vars={"city_name": "London"})
-        interpreter_refined = Interpreter(program_refined, initial_vars={"city_name": "London"})
-        await interpreter_refined.run() # await
+    async def test_retrieval_with_templating_in_query(self):
+        input_vars_spec = {"city_name": "string"}
+        actual_input_values = {"city_name": "London"}
+
+        program_refined = create_retrieve_test_program(
+            str(self.test_kb_path),
+            "capital {{city_name}}",
+            k=1,
+            initial_vars_spec=input_vars_spec
+        )
+        interpreter_refined = Interpreter(program_refined) # Removed initial_vars from constructor
+        await interpreter_refined.run(inputs=actual_input_values) # Pass actual values to run
+
         retrieved_docs_refined = interpreter_refined.context.get_variable("retrieved_docs")
         self.assertEqual(len(retrieved_docs_refined), 1)
         self.assertEqual(retrieved_docs_refined[0]["id"], "doc3")
         self.assertAlmostEqual(retrieved_docs_refined[0]["score"], 2.0)
 
 
-    async def test_retrieval_k_value_respected(self): # async
+    async def test_retrieval_k_value_respected(self):
         program = create_retrieve_test_program(str(self.test_kb_path), "Paris", k=1)
         interpreter = Interpreter(program)
         await interpreter.run() # await
