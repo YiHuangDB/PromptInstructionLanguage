@@ -6,6 +6,7 @@ from pil_engine.interpreter import Interpreter, PilParser
 from pil_engine.core.components import PilProgram, Config
 from pil_engine.core.context import Context
 from pil_engine.exceptions import OutputValidationError, ConstraintViolationError
+from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
 
 # Helper to create a PilProgram for testing program-level self-correction
 def create_program_correction_test_program(
@@ -168,7 +169,7 @@ except NameError: # pil_last_error_info not defined (first run)
         )
         interpreter = Interpreter(program, debug_mode=True)
 
-        with self.assertRaises(OutputValidationError) as cm:
+        with self.assertRaises(JsonSchemaValidationError) as cm: # Changed here
             await interpreter.run()
 
         self.assertIn("123 is not of type 'string'", str(cm.exception))
@@ -193,7 +194,7 @@ except NameError: # pil_last_error_info not defined (first run)
         )
         interpreter = Interpreter(program, debug_mode=True)
 
-        with self.assertRaises(OutputValidationError):
+        with self.assertRaises(JsonSchemaValidationError): # Changed here
             await interpreter.run()
 
         attempt_logs = [entry for entry in interpreter.trace_log if entry.get("event") == "PROGRAM_ATTEMPT_START"]

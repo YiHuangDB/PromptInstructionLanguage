@@ -135,8 +135,70 @@ if __name__ == '__main__':
     except ValueError as e:
          print(f"Caught expected eval error (asteval policy for indexing): {e}")
 
-    # Add asteval to requirements.txt
-    # (This should be done via a separate tool call if I were a full agent,
-    # but for now I'll just note it as a dependency)
-    # requirements.txt should include:
-    # asteval>=0.9.30
+def sanitize_for_llm_prompt(input_string: str) -> str:
+    """
+    Sanitizes a string that will be part of an LLM prompt to mitigate prompt injection.
+    This is a basic sanitizer; more sophisticated methods might be needed for robust security.
+    """
+    if not isinstance(input_string, str):
+        return input_string # Only sanitize strings
+
+    # 1. Escape backticks to prevent unintended code block interpretation
+    sanitized = input_string.replace("`", "\\`")
+
+    # 2. Neutralize common instruction-like prefixes at the beginning of lines
+    #    This is a simple approach; more robust would be regex for various phrasings.
+    #    Adding a non-printable character (like Zero Width Space U+200B) can break tokenization
+    #    of these phrases for the LLM, or prepend with a disclaimer.
+    #    For simplicity, let's prepend a notice if such lines are detected.
+    #    This is highly contextual and might need refinement.
+    lines = sanitized.split('\n')
+    processed_lines = []
+    instruction_keywords = [
+        "ignore previous instructions",
+        "disregard prior directives",
+        "your new instructions are",
+        "system:", # To prevent mimicking system messages
+        "user:",   # To prevent mimicking user messages
+        "assistant:" # To prevent mimicking assistant messages
+    ]
+    for line in lines:
+        stripped_line_lower = line.strip().lower()
+        for keyword in instruction_keywords:
+            if stripped_line_lower.startswith(keyword):
+                # Prepending might be too verbose.
+                # Altering the keyword might be better, e.g., "System\uFF1A" (full-width colon)
+                # For now, let's try a simple replacement for colons in role markers
+                if keyword.endswith(":") and stripped_line_lower.startswith(keyword):
+                    line = line.replace(":", "\uFF1A", 1) # Replace first colon with full-width
+                # For longer instruction phrases, more complex neutralization might be needed.
+                # This part is highly experimental and prone to false positives/negatives.
+                break
+        processed_lines.append(line)
+    sanitized = "\n".join(processed_lines)
+
+    # 3. Escape or modify template-like sequences if they appear in user input
+    #    to prevent them from being re-interpreted by any subsequent processing
+    #    or confusing the LLM if it has been trained on such syntax.
+    sanitized = sanitized.replace("{{", "{ {")
+    sanitized = sanitized.replace("}}", "} }")
+    # also consider {% and %} if Jinja-like syntax is a broader concern
+    sanitized = sanitized.replace("{%", "{ %")
+    sanitized = sanitized.replace("%}", "% }")
+
+    # 4. Simple newline management: collapse multiple newlines to a single one,
+    #    and strip leading/trailing whitespace from the whole string.
+    #    This is a mild normalization.
+    sanitized = re.sub(r'\n\s*\n', '\n', sanitized) # Collapse multiple newlines (with potential whitespace in between)
+    sanitized = sanitized.strip()
+
+    # Potentially log if a significant sanitization occurred, for audit/awareness.
+    if sanitized != input_string:
+        # In a real app, use proper logging
+        print(f"DEBUG_SANITIZE: Original: '{input_string[:100]}...' -> Sanitized: '{sanitized[:100]}...'")
+
+    return sanitized
+
+
+if __name__ == '__main__':
+    print("PIL Utils with Jinja2 and asteval")
