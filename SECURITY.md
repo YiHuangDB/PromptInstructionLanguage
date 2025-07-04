@@ -69,3 +69,32 @@ While the engine provides some built-in protections, PIL program authors should 
     *   Test your PIL programs with potential injection payloads, especially if they handle sensitive operations or data.
 
 By combining the PIL engine's built-in mitigations with careful prompt engineering and security best practices by PIL program authors, the risk of successful prompt injection attacks can be significantly reduced.
+
+## CodeStep Security and Sandboxing
+
+The `CodeStep` allows execution of Python scriptlets within a PIL program. To mitigate risks associated with running potentially untrusted code, `CodeStep` employs the `asteval` library for sandboxing.
+
+### `asteval` Configuration
+
+The `asteval.Interpreter` is configured with security in mind:
+
+*   **Base Configuration**: It starts with `minimal=False`, which provides a range of Python features but, importantly, `asteval` by default disables dangerous operations like `import` statements and direct access to most built-in functions that could interact with the filesystem or network (e.g., `open()`, `eval()`, `exec()`).
+*   **Custom Node Restrictions**: A specific `config` dictionary is passed to the `asteval.Interpreter` to further restrict the available Python AST (Abstract Syntax Tree) nodes. The following potentially risky or overly complex nodes are **explicitly disabled**:
+    *   `functiondef`: Users cannot define their own functions within a `CodeStep` script. This simplifies script analysis and reduces potential for obfuscation or complex recursive calls.
+    *   `with`: The `with` statement is disabled as its primary safe use case (file operations via `open()`) is already restricted, and it could otherwise interact with custom context manager objects in potentially unsafe ways if such objects were passed into the sandbox.
+    *   `assert`: `assert` statements are disabled.
+    *   `raise`: Explicit `raise` statements within the user's script are disabled. Errors due to disallowed operations or invalid Python will still be raised by `asteval` itself and caught by the PIL interpreter.
+*   **Allowed Features**: Despite these restrictions, `CodeStep` still allows for a useful range of Python functionality necessary for data manipulation and simple logic, including:
+    *   Control flow: `if...elif...else`, `for...in...`, `while...`.
+    *   Expressions: Ternary expressions (`value_if_true if condition else value_if_false`).
+    *   Data structures: List, dictionary, and set comprehensions.
+    *   Assignments: Standard (`=`) and augmented (`+=`, `-=`, etc.).
+    *   Error Handling: `try...except` blocks *are allowed* for robust script writing (e.g., checking for optional variables).
+    *   String formatting: f-strings are enabled.
+    *   `print()`: The `print` function is available (output goes to `asteval`'s configured writer, which is typically `sys.stdout` and not directly captured by the `CodeStep`'s `def_var` output).
+
+### Security Goal
+
+The goal of this configuration is to provide a `CodeStep` environment that is powerful enough for common data transformation and scripting tasks within a PIL workflow, while significantly reducing the risk of malicious code execution that could compromise the host system or exfiltrate data beyond the intended PIL context.
+
+Users should still write `CodeStep` scripts with care, understanding that they operate on data within the PIL context. The sandbox primarily protects the system *from* the `CodeStep`, not necessarily all data *within* the `CodeStep` from flawed script logic (e.g., accidentally clearing a list passed in from the context).
