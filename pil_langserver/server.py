@@ -25,10 +25,11 @@ from pygls.lsp.types import (
     MarkupContent,     # Added
     MarkupKind         # Added
 )
-import yaml
-import re # Added for word extraction in hover/completion
+from ruamel.yaml import YAML as RuamelYAML # Changed from 'import yaml'
+from ruamel.yaml.error import YAMLError as RuamelYAMLError # Specific error type
+import re
 from pil_engine.interpreter import PilParser
-from pil_engine.exceptions import PilEngineError # For catching general PIL errors
+from pil_engine.exceptions import PilEngineError, PILParsingError # Added PILParsingError
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(name)s - %(message)s")
@@ -41,6 +42,7 @@ class PilLanguageServer(LanguageServer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.pil_parser = PilParser() # Initialize parser instance
+        self.yaml_parser = RuamelYAML() # For parsing with location info
         logger.info("PIL Language Server initialized.")
 
     # Overriding capabilities directly in the class definition
@@ -63,27 +65,98 @@ class PilLanguageServer(LanguageServer):
 pil_server = PilLanguageServer("pil-server", "v0.1")
 
 # --- Completion Data ---
-TOP_LEVEL_KEYWORDS = ["config", "persona", "input", "outputSchema", "workflow", "constraints"]
-STEP_TYPE_KEYWORDS = ["prompt", "retrieve", "tool", "code", "if", "for", "while", "loop"] # 'loop' is alias for while
-COMMON_STEP_PARAMS = ["def"] # 'def' is common to most steps
+# Using dictionaries for parameters to store more info like documentation or type
+TOP_LEVEL_KEYWORDS_DOC = {
+    "config": "Global configuration for the PIL program.",
+    "persona": "Defines the LLM's persona.",
+    "input": "Declares input variables for the program.",
+    "outputSchema": "Defines the JSON Schema for the final program output.",
+    "workflow": "The main block containing executable steps.",
+    "constraints": "Top-level constraints for the final program output."
+}
+STEP_TYPE_KEYWORDS_DOC = {
+    "prompt": "Interact with an LLM.",
+    "retrieve": "Retrieve data from a knowledge source.",
+    "tool": "Execute a predefined tool.",
+    "code": "Execute a Python script.",
+    "if": "Conditional execution branch. Condition is specified by the 'if' key itself.",
+    # 'for' and 'while' are handled by 'loop' with specific expression parsing.
+    # For autocompletion, we can offer 'loop' and then guide expression.
+    # Or directly offer "for:", "while:" as starting points for a loop step.
+    # Let's keep them for now as they are valid keys that imply a LoopStep.
+    "for": "Iterate over a collection or range. Expression follows 'for'.",
+    "while": "Execute steps while a condition is true. Condition follows 'while'.",
+    "loop": "Defines a loop (can be for-each, for-range, or while based on expression)."
+}
+COMMON_STEP_PARAMS_DOC = {
+    "def": "Variable name to store the step's output."
+}
+
+# Parameter details: (description, insert_text_suffix, kind)
+# insert_text_suffix: e.g., ": " for simple values, ":\n  " for blocks
+PARAM_DETAILS = {
+    "text": ("The main prompt text (supports {{templating}}).", ": |\n  ", CompletionItemKind.PROPERTY),
+    "examples": ("List of input/output examples for few-shot prompting.", ":\n  - input: \n    output: \n  ", CompletionItemKind.PROPERTY),
+    "constraints": ("Validation rules for the step's output.", ":\n  type: \n  ", CompletionItemKind.PROPERTY),
+    "max_retries": ("Max self-correction retries if constraints fail.", ": 0", CompletionItemKind.PROPERTY),
+    "from": ("Source of the knowledge base (e.g., file path).", ": ", CompletionItemKind.PROPERTY),
+    "query": ("Query string for retrieval (supports {{templating}}).", ": ", CompletionItemKind.PROPERTY),
+    "k": ("Maximum number of documents to retrieve.", ": 3", CompletionItemKind.PROPERTY),
+    "name": ("Registered name of the tool or input variable name.", ": ", CompletionItemKind.PROPERTY), # Context dependent
+    "args": ("Dictionary of arguments for the tool.", ":\n  ", CompletionItemKind.PROPERTY),
+    "lang": ("Language of the script (e.g., 'python').", ": python", CompletionItemKind.PROPERTY),
+    "script": ("Block of code to execute.", ": |\n  ", CompletionItemKind.PROPERTY),
+    "if": ("Condition expression for an if-step.", ": ", CompletionItemKind.PROPERTY), # Also a step type
+    "then": ("Steps to execute if condition is true.", ":\n  - ", CompletionItemKind.PROPERTY),
+    "else": ("Steps to execute if condition is false.", ":\n  - ", CompletionItemKind.PROPERTY),
+    "for": ("Expression for a for-loop (e.g., 'item in {{my_list}}' or 'i in range(5)').", ": ", CompletionItemKind.PROPERTY), # Also a step type
+    "while": ("Condition expression for a while-loop.", ": ", CompletionItemKind.PROPERTY), # Also a step type
+    "loop": ("Expression for any loop type (for, while).", ": ", CompletionItemKind.PROPERTY), # Also a step type
+    "steps": ("List of steps within a workflow, if, or loop.", ":\n  - ", CompletionItemKind.PROPERTY),
+    "def": ("Variable name to store step output.", ": ", CompletionItemKind.PROPERTY),
+}
+
 
 STEP_SPECIFIC_PARAMS = {
     "prompt": ["text", "examples", "constraints", "max_retries"],
     "retrieve": ["from", "query", "k"],
     "tool": ["name", "args"],
     "code": ["lang", "script"],
-    "if": ["if", "then", "else"], # 'if' is also the condition key
-    "for": ["for", "steps"],      # 'for' is also the expression key
-    "while": ["while", "steps"],  # 'while' is also the expression key
-    "loop": ["loop", "steps"],    # 'loop' is also the expression key
+    "if": ["if", "then", "else"],
+    # Loop expressions are part of the main key ('for', 'while', 'loop')
+    # The 'steps' key is common for blocks within loops.
+    "for": ["steps"], # Expression is the value of 'for'
+    "while": ["steps"],# Expression is the value of 'while'
+    "loop": ["steps"], # Expression is the value of 'loop'
 }
-ALL_STEP_PARAM_KEYWORDS = list(set(COMMON_STEP_PARAMS + [p for params in STEP_SPECIFIC_PARAMS.values() for p in params]))
+# ALL_STEP_PARAM_KEYWORDS = list(set(COMMON_STEP_PARAMS + [p for params in STEP_SPECIFIC_PARAMS.values() for p in params])) # Old
 
-CONFIG_KEYWORDS = ["model", "api_key", "parameters"]
-PERSONA_KEYWORDS = ["role", "style", "tone", "audience"]
-INPUT_KEYWORDS = ["vars"] # Under vars, it's dynamic
-OUTPUTSCHEMA_KEYWORDS = ["schema"]
-CONSTRAINTS_KEYWORDS = ["type", "regex", "choices", "custom_validator"]
+CONFIG_KEYWORDS_DOC = {
+    "model": ("LLM model identifier.", ": ", CompletionItemKind.PROPERTY),
+    "api_key": ("API key for the LLM service (use environment variables for security).", ": YOUR_API_KEY", CompletionItemKind.PROPERTY),
+    "parameters": ("LLM call parameters (e.g., temperature).", ":\n  temperature: 0.7\n  ", CompletionItemKind.PROPERTY),
+    "max_program_retries": ("Max program-level self-correction retries.", ": 0", CompletionItemKind.PROPERTY)
+}
+PERSONA_KEYWORDS_DOC = {
+    "role": ("Primary role for LLM.", ": ", CompletionItemKind.PROPERTY),
+    "style": ("Writing style for LLM.", ": ", CompletionItemKind.PROPERTY),
+    "tone": ("Emotional tone for LLM.", ": ", CompletionItemKind.PROPERTY),
+    "audience": ("Intended audience for LLM.", ": ", CompletionItemKind.PROPERTY)
+}
+INPUT_KEYWORDS_DOC = {
+    "vars": ("Defines input variables (name: type or list of {name, type, desc}).", ":\n  ", CompletionItemKind.PROPERTY)
+}
+OUTPUTSCHEMA_KEYWORDS_DOC = {
+    "schema": ("JSON Schema object for output validation.", ":\n  type: object\n  properties:\n    ", CompletionItemKind.PROPERTY)
+}
+CONSTRAINTS_KEYWORDS_DOC = {
+    "type": ("Expected data type (string, integer, number, boolean, list, object).", ": ", CompletionItemKind.PROPERTY),
+    "regex": ("Python regex pattern for string validation.", ": ", CompletionItemKind.PROPERTY),
+    "choices": ("List of allowed string values.", ":\n  - ", CompletionItemKind.PROPERTY),
+    "custom_validator": ("Path to custom validator function (module:function).", ": ", CompletionItemKind.PROPERTY)
+}
+LANG_PYTHON_COMPLETION = [create_completion_item("python", CompletionItemKind.VALUE, insert_text="python", detail="Python language for CodeStep")]
+TYPE_CONSTRAINT_VALUES = ["string", "integer", "number", "boolean", "list", "object"]
 
 
 def create_completion_item(label: str, kind: CompletionItemKind, insert_text: str = None, documentation: str = None, detail: str = None) -> CompletionItem:
@@ -168,14 +241,13 @@ async def _validate_document(ls: PilLanguageServer, doc_uri: str):
 
         # Attempt to parse YAML first
         try:
-            parsed_yaml_content = yaml.safe_load(content)
+            # Use ruamel.yaml for parsing to get line/column info
+            parsed_yaml_content = ls.yaml_parser.load(content)
+
             if not isinstance(parsed_yaml_content, dict):
-                # If YAML is valid but not a dictionary at the root, it's not a valid PIL program.
-                # Create a basic diagnostic for this.
-                # For now, make a document-level diagnostic if not a dict.
                 diagnostics.append(
                     Diagnostic(
-                        range=LspRange(start=Position(line=0, character=0), end=Position(line=0, character=max(0,len(document.lines[0])-1 if document.lines else 0))), # Highlight first line
+                        range=LspRange(start=Position(line=0, character=0), end=Position(line=0, character=max(0,len(document.lines[0])-1 if document.lines else 0))),
                         message="PIL program root must be a YAML mapping (dictionary).",
                         severity=DiagnosticSeverity.ERROR,
                         source=ls.SOURCE_NAME
@@ -183,36 +255,62 @@ async def _validate_document(ls: PilLanguageServer, doc_uri: str):
                 )
             else:
                 # If YAML parsing is fine and it's a dict, try parsing with PilParser
-                ls.pil_parser.parse_dict(parsed_yaml_content)
-                logger.info(f"Document {doc_uri} parsed successfully by PilParser.")
-        except yaml.YAMLError as e:
-            logger.warning(f"YAML parsing error in {doc_uri}: {e}")
-            # Try to get line/column information from YamlError if available
-            # PyYAML's Mark object has line, column (0-indexed)
+                # TODO: Refactor PilParser().parse_dict or relevant component from_yaml methods
+                # to accept ruamel.yaml nodes or handle location data passed alongside.
+                # For now, it will still raise errors without location from the core parser.
+            # PASSING is_lsp_parse=True to enable location-aware parsing
+            ls.pil_parser.parse_dict(parsed_yaml_content, is_lsp_parse=True)
+                logger.info(f"Document {doc_uri} parsed successfully by PilParser (semantic validation).")
+
+        except RuamelYAMLError as e: # Catch ruamel.yaml specific errors
+            logger.warning(f"YAML parsing error in {doc_uri} (ruamel.yaml): {e}")
             start_line = e.problem_mark.line if hasattr(e, 'problem_mark') and e.problem_mark else 0
             start_char = e.problem_mark.column if hasattr(e, 'problem_mark') and e.problem_mark else 0
-            # For end position, we might just highlight the line or a few chars.
-            # A simple approach is to highlight from the error char to end of line, or a fixed length.
-            end_char = start_char + 1 # Default to highlighting one character
-            if start_line < len(document.lines):
-                end_char = max(start_char + 1, len(document.lines[start_line]))
-
+            end_char = start_char + 1
+            if start_line < len(document.lines) and hasattr(e, 'problem_mark') and e.problem_mark:
+                 # Try to highlight the problematic token or a small range
+                problem_text_segment = getattr(e, 'problem', '')
+                if problem_text_segment and isinstance(problem_text_segment, str):
+                    # A more robust way would be to find the token boundaries if possible
+                    end_char = start_char + len(problem_text_segment.split('\n')[0]) # Length of first line of problem segment
+                else: # Fallback to end of line
+                    end_char = len(document.lines[start_line])
 
             diagnostics.append(
                 Diagnostic(
                     range=LspRange(
                         start=Position(line=start_line, character=start_char),
-                        end=Position(line=start_line, character=end_char)
+                        end=Position(line=start_line, character=max(start_char + 1, end_char))
                     ),
-                    message=f"YAML Error: {e.problem}", # e.problem is usually more concise
+                    message=f"YAML Syntax Error: {e.problem}",
                     severity=DiagnosticSeverity.ERROR,
                     source=ls.SOURCE_NAME
                 )
             )
-        except (ValueError, TypeError, PilEngineError) as e: # Catch errors from PilParser.parse_dict
-            logger.warning(f"PIL parsing error in {doc_uri}: {e}")
-            # These errors currently don't have line/char info from PilParser.
-            # Report as a document-level error (e.g., on the first line).
+        except PILParsingError as e: # Custom error that should contain location info
+            logger.warning(f"PIL parsing error in {doc_uri}: {e.message} at L{e.line} C{e.column}")
+            line = e.line or 0
+            col = e.column or 0
+            # Create a small range for the error, e.g., 1 character or until end of word
+            # This needs to be improved if end_line/end_column are available.
+            end_col = col + 1
+            if line < len(document.lines):
+                # Attempt to find a sensible end column (e.g., end of word or line)
+                line_content = document.lines[line]
+                match_word_after = re.match(r'\w*', line_content[col:])
+                if match_word_after:
+                    end_col = col + len(match_word_after.group(0)) if match_word_after.group(0) else col + 1
+
+            diagnostics.append(
+                Diagnostic(
+                    range=LspRange(start=Position(line=line, character=col), end=Position(line=line, character=max(col+1, end_col))),
+                    message=f"PIL Error: {e.message}",
+                    severity=DiagnosticSeverity.ERROR,
+                    source=ls.SOURCE_NAME
+                )
+            )
+        except (ValueError, TypeError, PilEngineError) as e: # Fallback for other PIL errors without location
+            logger.warning(f"Generic PIL parsing error in {doc_uri}: {e}")
             diagnostics.append(
                 Diagnostic(
                     range=LspRange(start=Position(line=0, character=0), end=Position(line=0, character=max(0,len(document.lines[0])-1 if document.lines else 0))),
@@ -221,8 +319,7 @@ async def _validate_document(ls: PilLanguageServer, doc_uri: str):
                     source=ls.SOURCE_NAME
                 )
             )
-        # This generic except is usually not recommended for production, but helpful during dev
-        except Exception as e:
+        except Exception as e: # Catch-all for unexpected issues during validation
             logger.error(f"Unexpected error during validation of {doc_uri}: {e}", exc_info=True)
             diagnostics.append(
                 Diagnostic(
@@ -318,110 +415,124 @@ async def completions(ls: PilLanguageServer, params: CompletionParams) -> Comple
     #    completion_items.append(CompletionItem(label="}}", insert_text="}}", kind=CompletionItemKind.TEXT, detail="Close template expression"))
         # Potentially add context variable completions here in the future
 
-    # For now, just a test item if typing "conf"
-    # if current_word.lower().startswith("conf"):
-    #      completion_items.append(CompletionItem(label="config:", kind=CompletionItemKind.KEYWORD, insert_text="config:\n  "))
+    # --- Main Completion Logic ---
+    completion_items: List[CompletionItem] = []
+    parent_key_info = _get_parent_key_info(document.lines, current_line_num, indent_level)
+    parent_key = parent_key_info[0] if parent_key_info else None
+    parent_indent = parent_key_info[1] if parent_key_info else -1
 
-    # Rudimentary context determination for top-level keys
-    # This assumes that if indent is 0 and the line is empty or contains the start of a word,
-    # we might be at the top level.
-    if indent_level == 0:
-        if not text_before_cursor.strip() or current_word: # Empty line or typing a word
-            for keyword in TOP_LEVEL_KEYWORDS:
-                if keyword.startswith(current_word):
-                    completion_items.append(
-                        create_completion_item(f"{keyword}:", CompletionItemKind.KEYWORD, insert_text=f"{keyword}:\n  ", detail=f"PIL top-level section: {keyword}")
-                    )
-
-    # Rudimentary context for step types (e.g. after "- ")
-    # This is a very simplified check. A proper YAML parser or state machine would be better.
-    stripped_line_before_cursor = text_before_cursor.strip()
-    if stripped_line_before_cursor == "-" or stripped_line_before_cursor == "- ":
-        for keyword in STEP_TYPE_KEYWORDS:
-            # If current_word is part of "- keyword", this won't work well yet.
-            # This primarily works when cursor is just after "- ".
-             completion_items.append(
-                create_completion_item(f"{keyword}: ", CompletionItemKind.KEYWORD, insert_text=f"{keyword}:\n  ", detail=f"PIL step type: {keyword}")
-            )
-    elif stripped_line_before_cursor.startswith("- ") and len(stripped_line_before_cursor) > 2:
-        partial_step_type = stripped_line_before_cursor[2:]
-        for keyword in STEP_TYPE_KEYWORDS:
-            if keyword.startswith(partial_step_type):
+    # 1. Top-level keywords
+    if indent_level == 0 and (not text_before_cursor.strip() or current_word):
+        for keyword, doc_string in TOP_LEVEL_KEYWORDS_DOC.items():
+            if keyword.startswith(current_word):
                 completion_items.append(
-                    create_completion_item(f"{keyword}:", CompletionItemKind.KEYWORD, insert_text=f"{keyword}:\n  ", detail=f"PIL step type: {keyword}")
+                    create_completion_item(f"{keyword}:", CompletionItemKind.KEYWORD, insert_text=f"{keyword}:\n{' ' * (indent_level + 2)}", documentation=doc_string, detail="PIL Top-Level Section")
                 )
 
-    # Suggest '{{' for starting a template, or '}}' if inside one
-    if text_before_cursor.endswith('{'):
-        completion_items.append(create_completion_item(label="{{", insert_text="{", kind=CompletionItemKind.TEXT, detail="Complete template expression start"))
-    # Basic check for being inside a template - very naive.
-    # A proper approach would count unmatched {{ and }}.
-    # if text_before_cursor.count("{{") > text_before_cursor.count("}}") and not text_before_cursor.endswith("}}"):
-    #     # This is where context variable completion would go
-    #     pass
+    # 2. Step type keywords (e.g., after "- ")
+    stripped_line_before_cursor = text_before_cursor.strip()
+    if stripped_line_before_cursor.startswith("-") and (stripped_line_before_cursor == "-" or stripped_line_before_cursor.endswith(" ")):
+        # If cursor is just after "- " or "- k" (for "keyword")
+        prefix_for_step_type = current_word if stripped_line_before_cursor.endswith(current_word) else ""
+        for keyword, doc_string in STEP_TYPE_KEYWORDS_DOC.items():
+            if keyword.startswith(prefix_for_step_type):
+                completion_items.append(
+                    create_completion_item(f"{keyword}:", CompletionItemKind.MODULE, insert_text=f"{keyword}:\n{' ' * (indent_level + 2)}", documentation=doc_string, detail="PIL Step Type")
+                )
+
+    # 3. Parameters based on parent key
+    if parent_key:
+        # Common params for all steps if under a step type
+        if parent_key in STEP_TYPE_KEYWORDS_DOC:
+            for param, doc_string in COMMON_STEP_PARAMS_DOC.items():
+                if param.startswith(current_word):
+                    desc, suffix, kind = PARAM_DETAILS.get(param, (doc_string, ": ", CompletionItemKind.PROPERTY))
+                    completion_items.append(create_completion_item(param, kind, insert_text=f"{param}{suffix}", documentation=desc, detail=f"Parameter for '{parent_key}' step"))
+
+            # Step-specific parameters
+            for param in STEP_SPECIFIC_PARAMS.get(parent_key, []):
+                if param.startswith(current_word):
+                    desc, suffix, kind = PARAM_DETAILS.get(param, (f"Parameter for {parent_key}", ": ", CompletionItemKind.PROPERTY))
+                    completion_items.append(create_completion_item(param, kind, insert_text=f"{param}{suffix}", documentation=desc, detail=f"Parameter for '{parent_key}' step"))
+
+        # Config parameters
+        elif parent_key == "config":
+            for param, (doc_string, suffix, kind) in CONFIG_KEYWORDS_DOC.items():
+                if param.startswith(current_word):
+                    completion_items.append(create_completion_item(param, kind, insert_text=f"{param}{suffix}", documentation=doc_string, detail="Config Parameter"))
+
+        # Persona parameters
+        elif parent_key == "persona":
+            for param, (doc_string, suffix, kind) in PERSONA_KEYWORDS_DOC.items():
+                if param.startswith(current_word):
+                    completion_items.append(create_completion_item(param, kind, insert_text=f"{param}{suffix}", documentation=doc_string, detail="Persona Parameter"))
+
+        # Input parameters
+        elif parent_key == "input":
+             for param, (doc_string, suffix, kind) in INPUT_KEYWORDS_DOC.items(): # usually 'vars'
+                if param.startswith(current_word):
+                    completion_items.append(create_completion_item(param, kind, insert_text=f"{param}{suffix}", documentation=doc_string, detail="Input Section Parameter"))
+
+        # OutputSchema parameters
+        elif parent_key == "outputSchema":
+            for param, (doc_string, suffix, kind) in OUTPUTSCHEMA_KEYWORDS_DOC.items(): # usually 'schema'
+                if param.startswith(current_word):
+                    completion_items.append(create_completion_item(param, kind, insert_text=f"{param}{suffix}", documentation=doc_string, detail="OutputSchema Parameter"))
+
+        # Constraints parameters (can be nested under steps or top-level)
+        elif parent_key == "constraints":
+            for param, (doc_string, suffix, kind) in CONSTRAINTS_KEYWORDS_DOC.items():
+                if param.startswith(current_word):
+                    completion_items.append(create_completion_item(param, kind, insert_text=f"{param}{suffix}", documentation=doc_string, detail="Constraint Parameter"))
+            # If typing after "type: ", suggest type values
+            if text_before_cursor.strip().startswith("type:"):
+                type_prefix = text_before_cursor.strip()[len("type:"):].lstrip()
+                for val in TYPE_CONSTRAINT_VALUES:
+                    if val.startswith(type_prefix):
+                        completion_items.append(create_completion_item(val, CompletionItemKind.ENUM_MEMBER, insert_text=val, detail="Constraint Type Value"))
+
+        # Specific value completions
+        if parent_key == "code" and text_before_cursor.strip().startswith("lang:"):
+            lang_prefix = text_before_cursor.strip()[len("lang:"):].lstrip()
+            if "python".startswith(lang_prefix):
+                completion_items.extend(LANG_PYTHON_COMPLETION)
+
+        # Input variable definition (under input -> vars: var_name: type)
+        grandparent_key_info = _get_parent_key_info(document.lines, parent_indent // 2 * 2, parent_indent) # Approx grandparent
+        if parent_key == "vars" or (grandparent_key_info and grandparent_key_info[0] == "vars"):
+             # If line is "  var_name:" and current_word is empty (just typed colon)
+            if text_before_cursor.strip().endswith(":") and not current_word:
+                 completion_items.append(create_completion_item("type", CompletionItemKind.PROPERTY, insert_text=" type: string", documentation="Data type of the input variable"))
 
 
-    # Get parent key context for parameter suggestions
-    parent_key_info = _get_parent_key_info(document.lines, current_line_num, indent_level)
+    # 4. Template variable completions `{{...}}`
+    if "{{" in text_before_cursor and text_before_cursor.rfind("}}") < text_before_cursor.rfind("{{"):
+        # Basic: try to get 'input' vars
+        try:
+            parsed_content = ls.yaml_parser.load(document.source) # Use ruamel to preserve structure if needed for deep parsing
+            if isinstance(parsed_content, dict) and "input" in parsed_content and "vars" in parsed_content["input"]:
+                input_vars_node = parsed_content["input"]["vars"]
+                vars_to_suggest = []
+                if isinstance(input_vars_node, dict):
+                    vars_to_suggest.extend(input_vars_node.keys())
+                elif isinstance(input_vars_node, list):
+                    for item in input_vars_node:
+                        if isinstance(item, dict) and "name" in item:
+                            vars_to_suggest.append(item["name"])
 
-    if parent_key_info:
-        parent_key, parent_indent = parent_key_info
-        logger.info(f"Parent key: '{parent_key}' at indent {parent_indent}")
+                # Extract prefix inside {{ for filtering
+                template_prefix_match = re.search(r'\{\{\s*([\w_]*)$', text_before_cursor)
+                template_prefix = template_prefix_match.group(1) if template_prefix_match else ""
 
-        # Only suggest parameters if current indent is greater than parent's key indent
-        if indent_level > parent_indent:
-            suggestions = []
-            detail_prefix = ""
-
-            if parent_key in STEP_TYPE_KEYWORDS:
-                suggestions.extend(COMMON_STEP_PARAMS)
-                suggestions.extend(STEP_SPECIFIC_PARAMS.get(parent_key, []))
-                detail_prefix = f"Parameter for '{parent_key}' step"
-            elif parent_key == "config":
-                suggestions.extend(CONFIG_KEYWORDS)
-                detail_prefix = "Parameter for 'config' section"
-            elif parent_key == "persona":
-                suggestions.extend(PERSONA_KEYWORDS)
-                detail_prefix = "Parameter for 'persona' section"
-            elif parent_key == "input":
-                suggestions.extend(INPUT_KEYWORDS) # mainly "vars"
-                detail_prefix = "Parameter for 'input' section"
-            elif parent_key == "vars": # under input
-                 # Suggest 'type:' or 'description:' if line looks like "var_name:" (handled by current_word being empty after ':')
-                if text_before_cursor.strip().endswith(":"):
-                    completion_items.append(create_completion_item("type:", CompletionItemKind.PROPERTY, insert_text="type: ", detail="Data type of the input variable"))
-                    completion_items.append(create_completion_item("description:", CompletionItemKind.PROPERTY, insert_text="description: ", detail="Description of the input variable"))
-            elif parent_key == "outputSchema":
-                suggestions.extend(OUTPUTSCHEMA_KEYWORDS) # mainly "schema"
-                detail_prefix = "Parameter for 'outputSchema' section"
-            elif parent_key == "constraints": # Top-level or step-level
-                suggestions.extend(CONSTRAINTS_KEYWORDS)
-                detail_prefix = "Parameter for 'constraints' section"
-            elif parent_key == "parameters": # under config
-                # Dynamic, no static keywords here, but could offer common LLM params if known
-                pass
-            elif parent_key == "examples": # under prompt (is a list of dicts)
-                 # If the current line starts with "- " and is properly indented under "examples:"
-                if text_before_cursor.strip().startswith("- ") and indent_level > parent_indent + 1: # typical list item indent
-                    completion_items.append(create_completion_item("input:", CompletionItemKind.PROPERTY, insert_text="input: ", detail="Example input"))
-                    completion_items.append(create_completion_item("output:", CompletionItemKind.PROPERTY, insert_text="output: ", detail="Example output"))
-
-
-            for keyword in suggestions:
-                if keyword.startswith(current_word):
-                    # Add colon and space for typical YAML key-value, and newline with indent for block
-                    insert_text_formatted = f"{keyword}:\n{' ' * (indent_level + 2)}"
-                    # Simpler insert for some keys that take simple values on same line or specific structures
-                    if keyword in ["type", "lang", "from", "query", "k", "name", "if", "for", "while", "loop", "def", "model", "api_key", "role", "style", "tone", "audience", "custom_validator", "regex"]:
-                        insert_text_formatted = f"{keyword}: "
-
-                    completion_items.append(
-                        create_completion_item(keyword, CompletionItemKind.PROPERTY, insert_text=insert_text_formatted, detail=detail_prefix)
-                    )
-
-            # Special case for 'lang: python' under 'code:'
-            if parent_key == "code" and text_before_cursor.strip() == "lang:":
-                completion_items.append(create_completion_item("python", CompletionItemKind.VALUE, insert_text="python", detail="Language type for code step"))
+                for var_name in vars_to_suggest:
+                    if var_name.startswith(template_prefix):
+                        completion_items.append(
+                            create_completion_item(var_name, CompletionItemKind.VARIABLE, insert_text=var_name, detail="Input Variable")
+                        )
+        except RuamelYAMLError: # If YAML is broken, can't parse for vars
+            pass
+        # Always suggest closing braces if inside template
+        completion_items.append(create_completion_item("}}", CompletionItemKind.TEXT, insert_text="}}", detail="Close template expression"))
 
 
     return CompletionList(is_incomplete=False, items=completion_items)
@@ -538,44 +649,47 @@ HOVER_DOCUMENTATION = {
     "workflow": "The main block containing a sequence of executable steps.",
     # "constraints" (top-level) is covered by the generic constraints key below
 
-    # Step Types
-    "prompt": "A step to interact with an LLM by sending a prompt and receiving a response.",
-    "retrieve": "A step to retrieve relevant data from a knowledge source (e.g., RAG).",
-    "tool": "A step to execute a predefined Python tool/function.",
-    "code": "A step to execute a block of Python code in a sandboxed environment.",
-    "if": "A control flow step for conditional execution of branches (`then`, `else`). Also the key for the condition expression itself.",
-    "for": "A control flow step for iterating over a collection or a range. Also the key for the loop expression.",
-    "while": "A control flow step for executing a block of steps while a condition is true. Also the key for the condition expression.",
-    "loop": "Alias for a `while` loop; executes steps while a condition is true. Also the key for the condition expression.",
+    # Step Types & their primary expression keys
+    "prompt": "A step to interact with an LLM by sending a prompt and receiving a response. Requires a `text` parameter.",
+    "retrieve": "A step to retrieve relevant data from a knowledge source. Requires `from` (source) and `query` parameters.",
+    "tool": "A step to execute a predefined Python tool/function. Requires `name` (tool name) and `args` parameters.",
+    "code": "A step to execute a block of Python code in a sandboxed environment. Requires `lang` and `script` parameters.",
+    "if": "A control flow step for conditional execution. The value of 'if' is the condition expression. Requires `then` block, `else` is optional.",
+    "for": "A control flow step for iterating. Expression (e.g., 'item in {{collection}}' or 'i in range(5)') is the value of 'for'. Requires `steps` block.",
+    "while": "A control flow step for conditional looping. Expression (condition) is the value of 'while'. Requires `steps` block.",
+    "loop": "A flexible loop step. Expression (e.g., 'item in {{collection}}', 'i in range(5)', or 'condition for while') is the value of 'loop'. Requires `steps` block.",
 
-    # Common Parameters
-    "def": "Defines a variable name to store the output of this step in the context.",
+    # Common Parameters for most steps
+    "def": "Defines a variable name in the context to store the output of this step.",
+
+    # Common block parameter
     "steps": "A list of steps to be executed, typically within `workflow`, `if`, or `loop` blocks.",
 
-    # PromptStep Specific
+    # PromptStep Specific Parameters
     "text": "The main prompt text for an LLM (supports {{templating}}).",
-    "examples": "A list of input/output examples for few-shot prompting.",
-    "max_retries": "Maximum self-correction retries if prompt constraints fail (default: 0).",
+    "examples": "A list of input/output examples for few-shot prompting. Each example is a dict with 'input' and 'output' keys.",
+    "max_retries": "Maximum self-correction retries for this prompt step if its constraints fail (default: 0).",
 
-    # RetrieveStep Specific
-    "from": "Specifies the source of the knowledge base (e.g., file path to JSON).",
-    "query": "The query string for retrieval (supports {{templating}}).",
+    # RetrieveStep Specific Parameters
+    "from": "Specifies the source of the knowledge base (e.g., file path to a JSON document list).",
+    "query": "The query string for information retrieval (supports {{templating}}).",
     "k": "The maximum number of documents to retrieve (default: 3).",
 
-    # ToolStep Specific
-    "name": "The registered name of the tool to execute OR the name of an input variable.", # Used in multiple contexts
-    "args": "A dictionary of arguments to pass to the tool.",
+    # ToolStep Specific Parameters
+    # "name" (for tool) is covered by the generic "name" below.
+    "args": "A dictionary of arguments (key-value pairs) to pass to the specified tool.",
 
-    # CodeStep Specific
-    "lang": "The language of the script (currently only 'python').",
-    "script": "The block of code to execute.",
+    # CodeStep Specific Parameters
+    "lang": "The language of the script to be executed (currently only 'python' is supported).",
+    "script": "The block of code to execute. The result should be assigned to a variable named 'result'.",
 
-    # IfStep Specific
-    "then": "Block of steps to execute if the 'if' condition is true.",
-    "else": "Block of steps to execute if the 'if' condition is false.",
+    # IfStep Specific Parameters
+    # "if" (condition) is covered by the step type "if".
+    "then": "A block of steps to execute if the 'if' condition evaluates to true.",
+    "else": "An optional block of steps to execute if the 'if' condition evaluates to false.",
 
-    # Constraints Object Keys (can be top-level or under a step)
-    "constraints": "Defines validation rules for an output (e.g., type, regex, choices, custom_validator).",
+    # Constraints Object Keys (can be top-level or under a step like PromptStep)
+    "constraints": "Defines validation rules for an output (e.g., program output or step output).",
     "type": "Specifies the expected data type (e.g., string, integer, boolean). Can perform coercion.",
     "regex": "A Python regular expression pattern that the value must match.",
     "choices": "A list of allowed values.",

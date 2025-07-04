@@ -43,13 +43,29 @@ class PilParser:
         except Exception as e:
             raise ValueError(f"Unexpected error creating PilProgram from YAML in '{file_path}': {e}")
 
-    def parse_dict(self, data: Dict[str, Any]) -> PilProgram:
-        if not isinstance(data, dict):
-            raise ValueError("PIL program data must be a dictionary.")
+    def parse_dict(self, data: Dict[str, Any]) -> PilProgram: # data can now be CommentedMap
+        # Check if it's a ruamel.yaml CommentedMap or a plain dict
+        is_commented_map = hasattr(data, 'lc') # lc (line/col) is a good indicator for ruamel nodes
+
+        if not isinstance(data, dict): # Still a valid check as CommentedMap is a dict subclass
+            # If precise location is available from data itself (e.g. if 'data' was a node itself)
+            line, col = (data.lc.line, data.lc.col) if is_commented_map else (None, None)
+            raise PILParsingError("PIL program root must be a YAML mapping (dictionary).", line=line, column=col)
         try:
-            return PilProgram.from_yaml(data, parse_step)
+            # Pass the raw data (which might be CommentedMap) and the step_parser
+            # The from_yaml methods will need to be aware of CommentedMap to extract line numbers
+            return PilProgram.from_yaml(data, parse_step, is_lsp_parse=is_commented_map)
+        except PILParsingError: # Re-raise if it already has location info
+            raise
         except Exception as e:
+            # For other errors, try to get location from the top-level data node if possible
+            line, col = (data.lc.line, data.lc.col) if is_commented_map else (None, None)
+            # Potentially wrap in PILParsingError if it's a generic error from deep within
+            # but for now, let original exception type propagate if not PILParsingError
+            # Or, more aggressively:
+            # raise PILParsingError(f"Unexpected error creating PilProgram: {e}", line=line, column=col, node_text=str(data)[:100]) from e
             raise ValueError(f"Unexpected error creating PilProgram from dictionary: {e}")
+
 
 class Interpreter:
     def __init__(self, pil_program: PilProgram,

@@ -9,6 +9,24 @@ class ConfigurationError(PilEngineError):
     """Exception for configuration-related errors."""
     pass
 
+class PILParsingError(PilEngineError):
+    """Custom exception for errors during PIL program parsing, with location info."""
+    def __init__(self, message: str, line: int = None, column: int = None, node_text: str = None):
+        super().__init__(message)
+        self.line = line
+        self.column = column
+        self.node_text = node_text # The text of the problematic YAML node
+
+    def __str__(self):
+        location = ""
+        if self.line is not None and self.column is not None:
+            location = f" (at L{self.line+1}:C{self.column+1})" # User-friendly 1-based indexing
+        elif self.line is not None:
+            location = f" (at L{self.line+1})"
+
+        node_info = f" near '{self.node_text}'" if self.node_text else ""
+        return f"{self.args[0]}{location}{node_info}"
+
 class ToolNotFoundException(PilEngineError, KeyError):
     """Exception raised when a tool is not found in the registry."""
     def __init__(self, message: str, tool_name: str = None, available_tools: list = None):

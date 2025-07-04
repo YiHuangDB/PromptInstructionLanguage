@@ -5,3 +5,4 @@ Jinja2>=3.0 # For advanced variable substitution and templating
 asteval>=0.9.30 # For safe evaluation of Python expressions (e.g., in conditions)
 jsonschema # For validating outputSchema (consider adding later)
 pygls>=1.0.0 # For Language Server Protocol implementation
+ruamel.yaml>=0.17.0 # For YAML parsing with line/column info (LSP diagnostics)
