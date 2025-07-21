@@ -13,9 +13,11 @@ from .core.context import Context
 from .utils import render_template_string, safe_eval_code_string, sanitize_for_llm_prompt # Added sanitize_for_llm_prompt
 from .exceptions import (
     ToolNotFoundException, ToolExecutionError, OutputValidationError,
-    InvalidSchemaError, ConfigurationError, ConstraintViolationError, PILParsingError # Added PILParsingError
+    InvalidSchemaError, ConfigurationError, ConstraintViolationError, PILParsingError,
+    CodeExecutionError # Added
 )
 from .validator import apply_constraints
+import unittest.mock # Added for mock-model
 
 import os
 import openai
@@ -127,6 +129,20 @@ class Interpreter:
             self._add_trace_log("LLM_CLIENT_INIT_SKIPPED", reason="No model specified in PIL config.")
             print("Interpreter: LLM client not initialized: No model specified in PIL program config.")
             self.llm_client = None
+            return
+
+        if model_name == "mock-model":
+            self.llm_client = unittest.mock.AsyncMock()
+            # Example of setting up a default mock response if all "mock-model" tests expect something similar:
+            # mock_completion = unittest.mock.AsyncMock()
+            # mock_choice = unittest.mock.MagicMock()
+            # mock_message = unittest.mock.MagicMock()
+            # mock_message.content = "Mocked AI Response for mock-model"
+            # mock_choice.message = mock_message
+            # mock_completion.choices = [mock_choice]
+            # self.llm_client.chat.completions.create.return_value = mock_completion
+            self._add_trace_log("LLM_CLIENT_INIT_MOCKED", model=model_name)
+            print(f"Interpreter: LLM client for 'mock-model' is mocked.")
             return
 
         api_key = api_key_from_config or os.environ.get("OPENAI_API_KEY")
@@ -571,14 +587,33 @@ class Interpreter:
             # We need to run the eval part in the executor.
             # The result is then fetched from aeval.symtable.
             await loop.run_in_executor(None, aeval.eval, rendered_script)
-        except Exception as e_exec: # Catch potential errors from within the executor/asteval
-            self._add_trace_log("CODE_EXECUTION_ERROR", script=rendered_script, error=str(e_exec))
-            raise ValueError(f"Error during asteval execution: {e_exec}\nScript:\n{rendered_script}") from e_exec
+        except Exception as e_exec:
+            # This catches errors if aeval.eval() itself raises an exception during parsing/compilation
+            # (e.g., SyntaxError for invalid Python, or NotImplementedError for disabled AST nodes like 'functiondef')
+            self._add_trace_log("CODE_EXECUTION_ASTEVAL_ERROR", script=rendered_script, error_type=type(e_exec).__name__, error_message=str(e_exec))
+            raise CodeExecutionError(
+                script_text=rendered_script,
+                original_error_type=type(e_exec).__name__,
+                original_error_message=str(e_exec)
+            ) from e_exec
 
-        if aeval.error: # Check for errors collected by asteval
-            error_msg = "\n".join([err.get_error()[1] for err in aeval.error])
-            self._add_trace_log("CODE_EXECUTION_ERROR", script=rendered_script, error=error_msg)
-            raise ValueError(f"Error executing Python code step: {error_msg}\nScript:\n{rendered_script}")
+        if aeval.error: # Check for runtime errors collected by asteval from the script execution
+            first_error = aeval.error[0] # Typically, the first error is the most relevant
+            error_details = first_error.get_error()
+            if len(error_details) == 3:
+                etype, emsg, _ = error_details # etype is a string like 'NameError'
+            else: # Expected 2: etype, emsg (e.g. for SyntaxError before execution)
+                etype, emsg = error_details
+
+            # Construct a full message, as emsg might not always include the type
+            full_emsg = f"{etype}: {emsg}" if not str(emsg).startswith(str(etype)) else str(emsg)
+
+            self._add_trace_log("CODE_EXECUTION_SCRIPT_ERROR", script=rendered_script, error_type=etype, error_message=full_emsg)
+            raise CodeExecutionError(
+                script_text=rendered_script,
+                original_error_type=etype,
+                original_error_message=full_emsg
+            )
 
         result_val = aeval.symtable.get('result', None)
         self._add_trace_log("CODE_EXECUTION_SUCCESS", script=rendered_script, result=str(result_val), sandbox_keys=list(aeval.symtable.keys()))
@@ -767,7 +802,15 @@ class Interpreter:
                 print(f"Interpreter: PIL program execution attempt {current_retry_count + 1} successful.")
                 break # Exit retry loop on success
 
-            except (OutputValidationError, ConstraintViolationError, jsonschema.exceptions.ValidationError) as e_val: # Added jsonschema.exceptions.ValidationError
+            # Specific catch for malformed schemas first
+            except jsonschema.exceptions.SchemaError as e_schema_err:
+                logger.error(f"Invalid outputSchema definition during attempt {current_retry_count + 1}: {e_schema_err}", exc_info=True)
+                self._add_trace_log("INVALID_SCHEMA_ERROR", attempt=current_retry_count + 1, error_type=type(e_schema_err).__name__, error_message=str(e_schema_err))
+                # This type of error should not typically be retried at program level, as the schema itself is broken.
+                raise InvalidSchemaError(f"Invalid OutputSchema provided: {e_schema_err}", schema_error=e_schema_err) from e_schema_err
+
+            # Catch data validation errors (against a valid schema) or constraint violations for retry
+            except (OutputValidationError, ConstraintViolationError, jsonschema.exceptions.ValidationError) as e_val:
                 last_validation_error = e_val
                 logger.warning(f"Attempt {current_retry_count + 1} failed validation: {e_val}")
                 self._add_trace_log("PROGRAM_ATTEMPT_VALIDATION_FAILED", attempt=current_retry_count + 1, error_type=type(e_val).__name__, error_message=str(e_val))

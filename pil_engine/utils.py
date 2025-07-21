@@ -1,6 +1,7 @@
 from jinja2 import Environment, select_autoescape, FileSystemLoader, StrictUndefined, UndefinedError
 from typing import Any, Dict
 import asteval # For safe evaluation of code literals if needed, or for condition evaluation.
+import re # For sanitize_for_llm_prompt
 
 # Initialize Jinja2 Environment
 # Using StrictUndefined to catch errors for undefined variables in templates
