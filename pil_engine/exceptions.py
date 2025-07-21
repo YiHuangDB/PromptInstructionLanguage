@@ -104,3 +104,30 @@ class ConstraintViolationError(PilEngineError):
         if self.constraint_details is not None:
             details += f" [Details: {self.constraint_details}]"
         return details
+
+class CodeExecutionError(PilEngineError):
+    """Exception raised when a CodeStep fails during execution."""
+    def __init__(self, message: str = "Error during CodeStep script execution.",
+                 script_text: str = None,
+                 original_error_type: str = None,
+                 original_error_message: str = None):
+        super().__init__(message)
+        self.script_text = script_text
+        self.original_error_type = original_error_type
+        self.original_error_message = original_error_message
+
+    def __str__(self):
+        base_msg = super().__str__()
+        details = []
+        if self.original_error_type:
+            details.append(f"Type: {self.original_error_type}")
+        if self.original_error_message:
+            # Truncate if too long
+            msg_str = str(self.original_error_message)
+            if len(msg_str) > 200: msg_str = msg_str[:197] + "..."
+            details.append(f"Message: {msg_str}")
+        # if self.script_text: # Script text can be very long, maybe not in default str
+        #     details.append(f"Script (first 100 chars): {self.script_text[:100]}")
+        if details:
+            return f"{base_msg} - Details: {'; '.join(details)}"
+        return base_msg

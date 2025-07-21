@@ -3,7 +3,7 @@ import jsonschema # For creating SchemaError in tests
 
 from pil_engine.interpreter import Interpreter, PilParser
 from pil_engine.core.components import PilProgram
-from pil_engine.exceptions import OutputValidationError, InvalidSchemaError, ConstraintViolationError
+from pil_engine.exceptions import OutputValidationError, InvalidSchemaError, ConstraintViolationError, CodeExecutionError
 from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
 
 
@@ -253,9 +253,10 @@ class TestCodeStepSandboxRestrictions(unittest.IsolatedAsyncioTestCase):
         parser = PilParser()
         program = parser.parse_dict(program_dict)
         interpreter = Interpreter(program)
-        with self.assertRaises(ValueError) as cm: # asteval usually raises NameError or SyntaxError for disallowed nodes, wrapped by our ValueError
+        with self.assertRaises(CodeExecutionError) as cm:
             await interpreter.run()
-        self.assertTrue("import" in str(cm.exception).lower() or "not defined" in str(cm.exception).lower() or "invalid syntax" in str(cm.exception).lower())
+        self.assertEqual(cm.exception.original_error_type, "NotImplementedError")
+        self.assertIn("import not supported", cm.exception.original_error_message.lower())
 
     async def test_codestep_open_file_disallowed(self):
         program_dict = {
@@ -266,10 +267,10 @@ class TestCodeStepSandboxRestrictions(unittest.IsolatedAsyncioTestCase):
         parser = PilParser()
         program = parser.parse_dict(program_dict)
         interpreter = Interpreter(program)
-        with self.assertRaises(ValueError) as cm:
+        with self.assertRaises(CodeExecutionError) as cm:
             await interpreter.run()
-        # Expecting NameError because 'open' should not be in the symbol table
-        self.assertIn("name 'open' is not defined", str(cm.exception).lower())
+        self.assertEqual(cm.exception.original_error_type, "NameError")
+        self.assertIn("name 'open' is not defined", cm.exception.original_error_message.lower())
 
     async def test_codestep_functiondef_disallowed(self):
         program_dict = {
@@ -280,12 +281,12 @@ class TestCodeStepSandboxRestrictions(unittest.IsolatedAsyncioTestCase):
         parser = PilParser()
         program = parser.parse_dict(program_dict)
         interpreter = Interpreter(program)
-        with self.assertRaises(ValueError) as cm:
+        with self.assertRaises(CodeExecutionError) as cm:
             await interpreter.run()
-        # Expecting error because 'functiondef' node is disabled in config
-        self.assertIn("functiondef not supported", str(cm.exception).lower())
+        self.assertEqual(cm.exception.original_error_type, "NotImplementedError")
+        self.assertIn("functiondef not supported", cm.exception.original_error_message.lower())
 
-    async def test_codestep_try_except_disallowed(self): # This test should fail if we re-enabled 'try'
+    async def test_codestep_try_except_allowed(self): # Renamed, as 'try' is allowed by current config
         program_dict = {
             "workflow": {"steps": [
                 {"code": {"lang": "python", "script": "try:\n  result=1\nexcept:\n  result=0", "def": "try_res"}}
@@ -294,13 +295,9 @@ class TestCodeStepSandboxRestrictions(unittest.IsolatedAsyncioTestCase):
         parser = PilParser()
         program = parser.parse_dict(program_dict)
         interpreter = Interpreter(program)
-        # If 'try' is disabled, this should error. If enabled (as it is now), it should pass.
-        # This test needs to be conditional or removed if 'try' is intentionally enabled.
-        # For now, let's assume we want to test if it *were* disabled.
-        # To make it pass with current config (try=True), we'd expect it NOT to raise error.
-        # Let's change this test to reflect that 'try' is allowed.
+        # 'try' is enabled in the current asteval config in interpreter.py
         output = await interpreter.run()
-        self.assertEqual(output, 1)
+        self.assertEqual(output, 1) # The script should run successfully
 
 
 if __name__ == '__main__':
